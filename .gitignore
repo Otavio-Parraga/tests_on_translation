@@ -8,10 +8,12 @@ dist/
 # Secrets (symlink to activation_engineering/.env)
 .env
 
-# Large generated artifacts — regenerable, never committed
-data/
-outputs/
-steering_vectors/
+# Large generated artifacts — regenerable, never committed.
+# Anchored to the repo root so they do NOT also match the package's
+# src/acttrans/data/ source directory.
+/data/
+/outputs/
+/steering_vectors/
 
 # Logs
 *.log
