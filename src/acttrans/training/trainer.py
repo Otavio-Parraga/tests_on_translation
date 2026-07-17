@@ -2,7 +2,6 @@ import datetime
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
@@ -13,53 +12,7 @@ from ..data.split import preprocess_activations, split_paired_activations
 from ..evaluation.metrics import compute_retrieval_metrics
 from ..models.translator import save_translator
 from ..utils.paths import best_translator_path, loss_tag, model_slug, resolve_losses
-
-
-def _make_loss_fn(loss_type, temperature):
-    if loss_type == "mse":
-        return lambda pred, tgt: F.mse_loss(pred, tgt)
-    elif loss_type == "cosine":
-        return lambda pred, tgt: F.cosine_embedding_loss(
-            pred, tgt, torch.ones(pred.size(0), device=pred.device)
-        )
-    elif loss_type == "info_nce":
-
-        def fn(pred, tgt):
-            p = F.normalize(pred, dim=-1)
-            t = F.normalize(tgt, dim=-1)
-            logits = (p @ t.T) / temperature
-            labels = torch.arange(len(p), device=p.device)
-            return (
-                F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)
-            ) / 2
-
-        return fn
-    elif loss_type == "vsp":
-        # VSP / SP-KD (vec2vec "vector-space preservation", Similarity-Preserving
-        # KD): preserve the batchwise pairwise-similarity (Gram) structure instead
-        # of matching coordinates. This is dimension-agnostic (pred and tgt can live
-        # in different-sized spaces) and directly fights the collapse-onto-the-mean
-        # failure mode, since a collapsed map cannot reproduce the target Gram.
-        #
-        # G = X X^T is [B, B]; row-normalize (SP-KD form) then match in Frobenius:
-        #   loss = || rownorm(G_pred) - rownorm(G_tgt) ||_F^2 / B^2
-        def fn(pred, tgt):
-            B = pred.size(0)
-            if B < 2:
-                # A single vector has no pairwise structure to preserve.
-                return pred.new_zeros(())
-            g_pred = pred @ pred.T
-            g_tgt = tgt @ tgt.T
-            g_pred = F.normalize(g_pred, p=2, dim=1)
-            g_tgt = F.normalize(g_tgt, p=2, dim=1)
-            return ((g_pred - g_tgt) ** 2).sum() / (B * B)
-
-        return fn
-    else:
-        raise ValueError(
-            f"Unknown loss type: {loss_type!r}. "
-            "Expected 'mse', 'cosine', 'info_nce', or 'vsp'."
-        )
+from .losses import make_loss_fn
 
 
 class ActivationDataset(Dataset):
@@ -130,7 +83,7 @@ def train_translator(activations_dict, config, translator_model):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = translator_model.to(device)
 
-    _loss_fns = [_make_loss_fn(name, temperature) for name in loss_names]
+    _loss_fns = [make_loss_fn(name, temperature) for name in loss_names]
 
     def criterion(pred, tgt):
         return sum(w * fn(pred, tgt) for fn, w in zip(_loss_fns, loss_weights))

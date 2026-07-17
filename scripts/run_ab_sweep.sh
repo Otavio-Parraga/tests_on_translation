@@ -10,12 +10,12 @@
 # Fully resumable: re-running skips (translator,norm,behavior) blocks already in
 # the shard. Safe to Ctrl-C and restart.
 #
-# Usage:
-#   ./run_ab_sweep.sh              # full sweep (background-friendly)
-#   ./run_ab_sweep.sh 10           # smoke test: 10 test items per coefficient
+# Usage (run from anywhere; the script cd's to the repo root itself):
+#   scripts/run_ab_sweep.sh              # full sweep (background-friendly)
+#   scripts/run_ab_sweep.sh 10           # smoke test: 10 test items per coefficient
 
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 PY="conda run -n acteng python"
 export HF_HUB_DISABLE_XET=1

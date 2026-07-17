@@ -3,14 +3,14 @@
 # translated Gemma steering vector for a given behavior.
 #
 # Usage:
-#   bash bash/ab_comparison.sh                        # full run, sycophancy
-#   bash bash/ab_comparison.sh --limit 30             # quick test (~1 min)
-#   bash bash/ab_comparison.sh --behavior refusal     # different behavior
-#   bash bash/ab_comparison.sh --coefficients -20 0 20
+#   scripts/ab_comparison.sh                        # full run, sycophancy
+#   scripts/ab_comparison.sh --limit 30             # quick test (~1 min)
+#   scripts/ab_comparison.sh --behavior refusal     # different behavior
+#   scripts/ab_comparison.sh --coefficients -20 0 20
 #
 # The translated vector must exist in this repo's steering_vectors/ dir.
 # If it doesn't, run:
-#   bash bash/translate_test.sh
+#   scripts/translate_test.sh
 
 set -euo pipefail
 

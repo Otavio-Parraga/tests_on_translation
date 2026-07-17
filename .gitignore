@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.pytest_cache/
 
 # Secrets (symlink to activation_engineering/.env)
 .env

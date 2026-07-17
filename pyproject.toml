@@ -22,5 +22,14 @@ dependencies = [
     "tensorboard",
 ]
 
+[project.optional-dependencies]
+# Test-only tooling. `pip install -e '.[test]' --no-deps` (or just `pip install
+# pytest` into the acteng env) — pytest's own deps are pure-python and never
+# touch the conda-managed torch/transformers.
+test = ["pytest"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

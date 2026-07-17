@@ -15,13 +15,13 @@
 #
 # Nothing here re-extracts activations if the caches already exist.
 #
-# Usage:
-#   ./run_loss_combo_sweep.sh            # extract-if-missing + train+eval all combos
-#   ./run_loss_combo_sweep.sh extract    # only ensure the shared activations exist
-#   ./run_loss_combo_sweep.sh train      # only train+eval (assumes activations exist)
+# Usage (run from anywhere; the script cd's to the repo root itself):
+#   scripts/run_loss_combo_sweep.sh            # extract-if-missing + train+eval all combos
+#   scripts/run_loss_combo_sweep.sh extract    # only ensure the shared activations exist
+#   scripts/run_loss_combo_sweep.sh train      # only train+eval (assumes activations exist)
 
 set -euo pipefail
-cd "$(dirname "$0")"   # repo root (so .env / load_dotenv finds HF_CACHE_DIR)
+cd "$(dirname "$0")/.."   # repo root (so .env / load_dotenv finds HF_CACHE_DIR)
 
 PY="conda run -n acteng python"
 
@@ -63,7 +63,7 @@ extract() {
     return 0
   fi
   echo "==> Some activation caches missing — extracting LAST-token activations"
-  echo "    (shared with the FineWeb sweep; run ./run_fineweb_sweep.sh extract instead"
+  echo "    (shared with the FineWeb sweep; run scripts/run_fineweb_sweep.sh extract instead"
   echo "     if you also want the mean-pooled caches.)"
   $PY prepare_activations.py --config "$LAST_CFG"
 }
@@ -78,7 +78,7 @@ preflight() {
     if [[ ! -f "$f" ]]; then echo "   MISSING: $f"; ok=0; else echo "   ok: $f"; fi
   done
   if [[ $ok -ne 1 ]]; then
-    echo "Pre-flight FAILED — run './run_loss_combo_sweep.sh extract' first." >&2
+    echo "Pre-flight FAILED — run 'scripts/run_loss_combo_sweep.sh extract' first." >&2
     exit 1
   fi
   echo "   Pre-flight OK."
@@ -102,9 +102,9 @@ train_all() {
   echo "==> Next: run the A/B steering eval + report over ALL translators"
   echo "    (single-loss + compound-loss checkpoints are picked up by the same glob):"
   echo
-  echo "        ./run_ab_sweep.sh"
+  echo "        scripts/run_ab_sweep.sh"
   echo
-  echo "    (or './run_ab_sweep.sh 10' for a 10-item-per-coefficient smoke test)"
+  echo "    (or 'scripts/run_ab_sweep.sh 10' for a 10-item-per-coefficient smoke test)"
 }
 
 MODE="${1:-all}"

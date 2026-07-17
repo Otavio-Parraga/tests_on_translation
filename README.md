@@ -283,7 +283,15 @@ conda run -n acteng pip install -e . --no-deps
 ```
 
 Every entry point is a script at the repo root; run them from the repo root
-(paths in the configs are relative to it).
+(paths in the configs are relative to it). Convenience shell wrappers live in
+`scripts/` (each `cd`s to the repo root itself, so they work from anywhere).
+
+Run the test suite with:
+
+```bash
+conda run -n acteng pip install -e '.[test]' --no-deps   # once, adds pytest
+conda run -n acteng python -m pytest
+```
 
 ## Project Structure
 
@@ -309,15 +317,19 @@ Every entry point is a script at the repo root; run them from the repo root
 │   ├── sweep_common.py          Shared blocks for the two sweep generators
 │   ├── generate_fineweb_configs.py     arch x loss x pooling sweep -> config/fineweb/
 │   └── generate_loss_combo_configs.py  compound-loss sweep -> config/loss_combos/
+├── scripts/                     Convenience shell wrappers (sweeps, extraction, translation)
+├── tests/                       pytest suite (paths, split, losses, metrics, translator)
 ├── src/acttrans/                The installable package
 │   ├── constants.py             Fixed experiment grid (model pair, layer, behaviors)
 │   ├── data/
-│   │   ├── dataset.py           Activation extraction with batch-level resume
-│   │   └── split.py             The seeded train/val split shared by all entry points
+│   │   ├── dataset.py           Activation extraction (batch resume) + per-dataset sentence loaders
+│   │   └── split.py             Seeded train/val split + activation preprocessing (shared)
 │   ├── models/
 │   │   ├── translator.py        MLP/Encoder/SAE/Flow/Linear translators + Procrustes fit
 │   │   └── transport.py         TranslatorRunner: in-memory direction transport
-│   ├── training/trainer.py      Training loop with TensorBoard logging
+│   ├── training/
+│   │   ├── trainer.py           Training loop with TensorBoard logging
+│   │   └── losses.py            Coordinate/relational losses (mse, cosine, info_nce, vsp)
 │   ├── evaluation/
 │   │   ├── evaluator.py         Checkpoint evaluation entry point
 │   │   ├── metrics.py           Top-k retrieval accuracy

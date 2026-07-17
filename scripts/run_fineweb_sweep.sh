@@ -12,13 +12,13 @@
 #   data/fineweb/activations/<model>_l8_mean.pt   (mean pooled)
 # Translator checkpoints + TensorBoard logs land in outputs/fineweb/.
 #
-# Usage:
-#   ./run_fineweb_sweep.sh            # extract (both poolings) + train+eval all 24
-#   ./run_fineweb_sweep.sh extract    # only extract the shared activations
-#   ./run_fineweb_sweep.sh train      # only train+eval (assumes activations exist)
+# Usage (run from anywhere; the script cd's to the repo root itself):
+#   scripts/run_fineweb_sweep.sh            # extract (both poolings) + train+eval all 24
+#   scripts/run_fineweb_sweep.sh extract    # only extract the shared activations
+#   scripts/run_fineweb_sweep.sh train      # only train+eval (assumes activations exist)
 
 set -euo pipefail
-cd "$(dirname "$0")"   # repo root (so .env / load_dotenv finds HF_CACHE_DIR)
+cd "$(dirname "$0")/.."   # repo root (so .env / load_dotenv finds HF_CACHE_DIR)
 
 PY="conda run -n acteng python"
 
@@ -65,7 +65,7 @@ preflight() {
     if [[ ! -f "$f" ]]; then echo "   MISSING: $f"; ok=0; else echo "   ok: $f"; fi
   done
   if [[ $ok -ne 1 ]]; then
-    echo "Pre-flight FAILED — run './run_fineweb_sweep.sh extract' first." >&2
+    echo "Pre-flight FAILED — run 'scripts/run_fineweb_sweep.sh extract' first." >&2
     exit 1
   fi
   echo "   Pre-flight OK."

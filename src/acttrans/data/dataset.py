@@ -189,6 +189,161 @@ def _extraction_worker(worker_args: Dict) -> None:
     )
 
 
+def _load_caa(behaviors, split, data_root, limit, hf_cache_dir):
+    sentences = []
+    data_root_path = Path(data_root)
+    filename = "generate_dataset.json" if split == "generate" else "test_dataset_ab.json"
+    for behavior in behaviors or []:
+        json_path = data_root_path / "CAA_datasets" / split / behavior / filename
+        if not json_path.exists():
+            raise FileNotFoundError(f"CAA dataset not found at {json_path}")
+        with open(json_path, "r") as f:
+            items = json.load(f)
+        for item in items:
+            question = item.get("question", "").strip()
+            pos_answer = item.get("answer_matching_behavior", "").strip()
+            neg_answer = item.get("answer_not_matching_behavior", "").strip()
+            if question:
+                sentences.append(question)
+            if pos_answer:
+                sentences.append(f"{question}\n\nAnswer: {pos_answer}")
+            if neg_answer:
+                sentences.append(f"{question}\n\nAnswer: {neg_answer}")
+    return sentences
+
+
+def _load_mwe(behaviors, split, data_root, limit, hf_cache_dir):
+    import random
+    import pandas as pd
+    sentences = []
+    mwe_root = Path(data_root) / "evals"
+    if not mwe_root.exists():
+        raise FileNotFoundError(f"MWE data directory not found at {mwe_root}")
+    jsonl_files = sorted(f for f in mwe_root.glob("**/*.jsonl") if "wino" not in f.stem)
+    if behaviors:
+        jsonl_files = [f for f in jsonl_files if f.stem in behaviors]
+    if not jsonl_files:
+        raise FileNotFoundError(
+            f"No MWE JSONL files found under {mwe_root} for behaviors={behaviors}"
+        )
+    for jsonl_file in jsonl_files:
+        rows = pd.read_json(jsonl_file, lines=True).to_dict(orient="records")
+        rng = random.Random(42)
+        rng.shuffle(rows)
+        n_train = int(len(rows) * 0.8)
+        rows = rows[:n_train] if split in ("train", "generate") else rows[n_train:]
+        for row in rows:
+            question = str(row.get("question", "")).strip()
+            pos = str(row.get("answer_matching_behavior", ""))
+            neg = str(row.get("answer_not_matching_behavior", ""))
+            bare_q = question.removesuffix("Answer:").rstrip()
+            if bare_q:
+                sentences.append(bare_q)
+            if pos.strip():
+                sentences.append(f"{question}{pos}")
+            if neg.strip():
+                sentences.append(f"{question}{neg}")
+    return sentences
+
+
+def _load_tqa(behaviors, split, data_root, limit, hf_cache_dir):
+    tqa_path = os.environ.get("TQA_PATH")
+    if not tqa_path:
+        raise ValueError("TQA_PATH environment variable is not set")
+    import pandas as pd
+    sentences = []
+    df = pd.read_csv(tqa_path)
+    for _, row in df.iterrows():
+        question = str(row.get("Question", "")).strip()
+        pos = str(row.get("Best Answer", "")).strip()
+        neg_raw = str(row.get("Incorrect Answers", "")).strip()
+        neg = neg_raw.split(";")[0].strip()
+        if question:
+            sentences.append(question)
+        if pos:
+            sentences.append(f"{question}\n\nAnswer: {pos}")
+        if neg:
+            sentences.append(f"{question}\n\nAnswer: {neg}")
+    return sentences
+
+
+def _load_generated(behaviors, split, data_root, limit, hf_cache_dir):
+    with open(data_root) as f:
+        return json.load(f)
+
+
+def _load_fineweb(behaviors, split, data_root, limit, hf_cache_dir):
+    import random
+    import re
+    from datasets import load_dataset
+
+    sentences = []
+    # FineWeb is terabytes — stream it (never materialized) and pull from the
+    # `text` column. The HF datasets cache is pinned to HF_CACHE_DIR, the same
+    # cache the models use, so weights and corpus share one location.
+    ds = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name="sample-10BT",
+        split="train",
+        streaming=True,
+        cache_dir=hf_cache_dir,
+    )
+
+    # Split each document into sentences; keep meaningful fragments only.
+    sentence_re = re.compile(r"(?<=[.!?])\s+")
+    min_chars = 20
+
+    def doc_sentences(text: str) -> List[str]:
+        out = []
+        for frag in sentence_re.split(text or ""):
+            frag = frag.strip()
+            if len(frag) >= min_chars:
+                out.append(frag)
+        return out
+
+    # Train/test split mirrors MWE: deterministic shuffle (seed 42), first 80%
+    # train, last 20% test. We partition at the DOCUMENT level — never the
+    # sentence level — so sentences from one doc can't leak across the split.
+    want_train = split in ("train", "generate")
+
+    # Stream enough documents to fill `limit` sentences on the requested side
+    # without draining the corpus. After the shuffle, our side holds ~`ratio`
+    # of all collected sentences, so we keep pulling docs until the projected
+    # side total clears the target (plus a small buffer for the estimate).
+    target = limit if limit is not None else 200_000
+    ratio = 0.8 if want_train else 0.2
+
+    docs: List[List[str]] = []
+    total_sentences = 0
+    for record in ds:
+        sents = doc_sentences(record.get("text", ""))
+        if not sents:
+            continue
+        docs.append(sents)
+        total_sentences += len(sents)
+        if total_sentences * ratio >= target + 5_000:
+            break
+
+    rng = random.Random(42)
+    rng.shuffle(docs)
+    n_train_docs = int(len(docs) * 0.8)
+    chosen = docs[:n_train_docs] if want_train else docs[n_train_docs:]
+    for doc in chosen:
+        sentences.extend(doc)
+    return sentences
+
+
+# Dispatch: dataset name -> loader. Adding a dataset is adding a function here;
+# the shared dedup + limit tail below stays in load_sentences_from_dataset.
+_DATASET_LOADERS = {
+    "CAA": _load_caa,
+    "MWE": _load_mwe,
+    "TQA": _load_tqa,
+    "GENERATED": _load_generated,
+    "FINEWEB": _load_fineweb,
+}
+
+
 def load_sentences_from_dataset(
     dataset_name: str,
     behaviors: Optional[List[str]],
@@ -197,144 +352,14 @@ def load_sentences_from_dataset(
     limit: Optional[int],
     hf_cache_dir: Optional[str] = None,
 ) -> List[str]:
-    sentences = []
-
-    if dataset_name == "CAA":
-        data_root_path = Path(data_root)
-        filename = "generate_dataset.json" if split == "generate" else "test_dataset_ab.json"
-        for behavior in behaviors or []:
-            json_path = data_root_path / "CAA_datasets" / split / behavior / filename
-            if not json_path.exists():
-                raise FileNotFoundError(f"CAA dataset not found at {json_path}")
-            with open(json_path, "r") as f:
-                items = json.load(f)
-            for item in items:
-                question = item.get("question", "").strip()
-                pos_answer = item.get("answer_matching_behavior", "").strip()
-                neg_answer = item.get("answer_not_matching_behavior", "").strip()
-                if question:
-                    sentences.append(question)
-                if pos_answer:
-                    sentences.append(f"{question}\n\nAnswer: {pos_answer}")
-                if neg_answer:
-                    sentences.append(f"{question}\n\nAnswer: {neg_answer}")
-
-    elif dataset_name == "MWE":
-        import random
-        import pandas as pd
-        mwe_root = Path(data_root) / "evals"
-        if not mwe_root.exists():
-            raise FileNotFoundError(f"MWE data directory not found at {mwe_root}")
-        jsonl_files = sorted(f for f in mwe_root.glob("**/*.jsonl") if "wino" not in f.stem)
-        if behaviors:
-            jsonl_files = [f for f in jsonl_files if f.stem in behaviors]
-        if not jsonl_files:
-            raise FileNotFoundError(
-                f"No MWE JSONL files found under {mwe_root} for behaviors={behaviors}"
-            )
-        for jsonl_file in jsonl_files:
-            rows = pd.read_json(jsonl_file, lines=True).to_dict(orient="records")
-            rng = random.Random(42)
-            rng.shuffle(rows)
-            n_train = int(len(rows) * 0.8)
-            rows = rows[:n_train] if split in ("train", "generate") else rows[n_train:]
-            for row in rows:
-                question = str(row.get("question", "")).strip()
-                pos = str(row.get("answer_matching_behavior", ""))
-                neg = str(row.get("answer_not_matching_behavior", ""))
-                bare_q = question.removesuffix("Answer:").rstrip()
-                if bare_q:
-                    sentences.append(bare_q)
-                if pos.strip():
-                    sentences.append(f"{question}{pos}")
-                if neg.strip():
-                    sentences.append(f"{question}{neg}")
-
-    elif dataset_name == "TQA":
-        tqa_path = os.environ.get("TQA_PATH")
-        if not tqa_path:
-            raise ValueError("TQA_PATH environment variable is not set")
-        import pandas as pd
-        df = pd.read_csv(tqa_path)
-        for _, row in df.iterrows():
-            question = str(row.get("Question", "")).strip()
-            pos = str(row.get("Best Answer", "")).strip()
-            neg_raw = str(row.get("Incorrect Answers", "")).strip()
-            neg = neg_raw.split(";")[0].strip()
-            if question:
-                sentences.append(question)
-            if pos:
-                sentences.append(f"{question}\n\nAnswer: {pos}")
-            if neg:
-                sentences.append(f"{question}\n\nAnswer: {neg}")
-
-    elif dataset_name == "GENERATED":
-        with open(data_root) as f:
-            sentences = json.load(f)
-
-    elif dataset_name == "FINEWEB":
-        import random
-        import re
-        from datasets import load_dataset
-
-        # FineWeb is terabytes — stream it (never materialized) and pull from the
-        # `text` column. The HF datasets cache is pinned to HF_CACHE_DIR, the same
-        # cache the models use, so weights and corpus share one location.
-        ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name="sample-10BT",
-            split="train",
-            streaming=True,
-            cache_dir=hf_cache_dir,
-        )
-
-        # Split each document into sentences; keep meaningful fragments only.
-        sentence_re = re.compile(r"(?<=[.!?])\s+")
-        min_chars = 20
-
-        def doc_sentences(text: str) -> List[str]:
-            out = []
-            for frag in sentence_re.split(text or ""):
-                frag = frag.strip()
-                if len(frag) >= min_chars:
-                    out.append(frag)
-            return out
-
-        # Train/test split mirrors MWE: deterministic shuffle (seed 42), first 80%
-        # train, last 20% test. We partition at the DOCUMENT level — never the
-        # sentence level — so sentences from one doc can't leak across the split.
-        want_train = split in ("train", "generate")
-
-        # Stream enough documents to fill `limit` sentences on the requested side
-        # without draining the corpus. After the shuffle, our side holds ~`ratio`
-        # of all collected sentences, so we keep pulling docs until the projected
-        # side total clears the target (plus a small buffer for the estimate).
-        target = limit if limit is not None else 200_000
-        ratio = 0.8 if want_train else 0.2
-
-        docs: List[List[str]] = []
-        total_sentences = 0
-        for record in ds:
-            sents = doc_sentences(record.get("text", ""))
-            if not sents:
-                continue
-            docs.append(sents)
-            total_sentences += len(sents)
-            if total_sentences * ratio >= target + 5_000:
-                break
-
-        rng = random.Random(42)
-        rng.shuffle(docs)
-        n_train_docs = int(len(docs) * 0.8)
-        chosen = docs[:n_train_docs] if want_train else docs[n_train_docs:]
-        for doc in chosen:
-            sentences.extend(doc)
-
-    else:
+    try:
+        loader = _DATASET_LOADERS[dataset_name]
+    except KeyError:
         raise ValueError(
             f"Unknown dataset_name: {dataset_name!r}. "
             "Expected 'CAA', 'MWE', 'TQA', 'GENERATED', or 'FINEWEB'."
         )
+    sentences = loader(behaviors, split, data_root, limit, hf_cache_dir)
 
     # Deduplicate while preserving order
     seen = set()
