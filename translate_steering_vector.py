@@ -8,161 +8,65 @@ The translated vector is saved under:
   {output_dir}/steering_vectors/{target_model}/{method}/{behavior}/{module}/layer_{target_layer}/sv.pt
   {output_dir}/steering_vectors/{target_model}/{method}/{behavior}/{module}/layer_{target_layer}/sv.json
 """
-import sys, argparse, json
+import argparse
+import json
 from pathlib import Path
 
-_PROJECT_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(_PROJECT_ROOT))
-
 import torch
-import torch.nn.functional as F
-from src.models.translator import build_translator, LinearTranslator
+
+from acttrans.models.transport import NORM_MODES, TranslatorRunner
+from acttrans.utils.paths import parse_sv_path, sv_path
+
+_PROJECT_ROOT = Path(__file__).resolve().parent
 
 
-def _parse_sv_path(sv_path: Path):
-    """Extract (model_slug, method, behavior, module, layer_idx) from an sv.pt path."""
-    parts = sv_path.parts
-    try:
-        root_idx = parts.index("steering_vectors")
-    except ValueError:
-        raise ValueError(f"'steering_vectors' not found in path: {sv_path}")
-
-    rel = parts[root_idx + 1:]
-    # Expected: {model}/{method}/{behavior}/{module}/layer_{idx}/sv.pt
-    if len(rel) < 6:
-        raise ValueError(
-            "Unexpected path structure. Expected:\n"
-            "  steering_vectors/{model}/{method}/{behavior}/{module}/layer_{idx}/sv.pt\n"
-            f"Got: {sv_path}"
-        )
-
-    model_slug, method, behavior, module, layer_part = rel[0], rel[1], rel[2], rel[3], rel[4]
-
-    if not layer_part.startswith("layer_"):
-        raise ValueError(f"Expected 'layer_{{idx}}', got: {layer_part!r}")
-    layer_idx = int(layer_part.split("_", 1)[1])
-
-    return model_slug, method, behavior, module, layer_idx
-
-
-def _model_slug(model_name: str) -> str:
-    return model_name.replace("/", "_")
-
-
-def translate_steering_vector(sv_path, checkpoint_path, output_dir=None, norm_mode="restore",
+def translate_steering_vector(sv_path_in, checkpoint_path, output_dir=None, norm_mode="restore",
                               apply_bias=False):
     """Transport a CAA steering vector from source to target model space.
 
-    A CAA steering vector is a DIFFERENCE direction (mean_pos - mean_neg), not an
-    activation. For a linear/Procrustes translator the map is affine (y = W.x + b),
-    and the bias cancels for a difference: T(a) - T(b) = W(a - b). So by default
-    (apply_bias=False) a LinearTranslator transports using the linear part only
-    (vec @ W.T, no bias) -- the correct behavior for a direction. Setting
-    apply_bias=True includes the affine bias and is only appropriate when
-    transporting a raw activation. apply_bias is LINEAR-ONLY: for non-linear
-    translators (mlp/encoder/flow/sae) there is no separable bias and the flag
-    has no effect.
-
-    norm_mode controls how the translated vector's magnitude is set, one of:
-      "restore":    rescale the output to the source SV's original norm
-                    (F.normalize(translated) * src_norm).
-      "none":       leave the translator output as-is.
-      "procrustes": multiply the (bias-free by default) linear output by the
-                    stored optimal scale s, giving the faithful floor transport
-                    s*(W.sv). LINEAR-ONLY: requires a checkpoint produced by
-                    fit_procrustes.py that carries config.translator.procrustes_scale.
+    The transport semantics (training-matched preprocessing, bias-free direction
+    transport for linear translators, and the norm modes "restore" / "none" /
+    "procrustes") live in ``acttrans.models.transport.TranslatorRunner``; this
+    function adds the file plumbing: locating the source sv.pt, mirroring the
+    activation_engineering folder structure on the output side, and carrying
+    the sv.json metadata over.
     """
-    valid_norm_modes = {"restore", "none", "procrustes"}
-    if norm_mode not in valid_norm_modes:
-        raise ValueError(
-            f"Unknown norm_mode {norm_mode!r}; expected one of {sorted(valid_norm_modes)}."
-        )
-    sv_path = Path(sv_path)
+    sv_path_in = Path(sv_path_in)
     checkpoint_path = Path(checkpoint_path)
 
-    if not sv_path.exists():
-        raise FileNotFoundError(f"Steering vector not found: {sv_path}")
+    if not sv_path_in.exists():
+        raise FileNotFoundError(f"Steering vector not found: {sv_path_in}")
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Translator checkpoint not found: {checkpoint_path}")
 
-    # Load checkpoint once to get config + build model
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    config = ckpt["config"]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    runner = TranslatorRunner(checkpoint_path, device=device)
+    config = runner.config
     target_model_name = config["target_model"]["name"]
     target_layer = config["target_model"]["layer"]
     target_module = config["target_model"]["module"]
-    normalize_activations = config.get("training", {}).get("normalize_activations", False)
-
-    translator = build_translator(config, input_dim=ckpt["input_dim"], output_dim=ckpt["output_dim"])
-    translator.load_state_dict(ckpt["state_dict"])
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    translator = translator.to(device).eval()
 
     # Parse source path to recover folder structure components
-    _, method, behavior, _, _ = _parse_sv_path(sv_path)
+    _, method, behavior, _, _ = parse_sv_path(sv_path_in)
 
     # Load vector and record original norm before any preprocessing
-    vec = torch.load(sv_path, map_location=device, weights_only=True).float()
-    if vec.dim() == 1:
-        vec = vec.unsqueeze(0)  # [1, D_src]
+    vec = torch.load(sv_path_in, map_location=device, weights_only=True).float()
+    src_norm = vec.norm(dim=-1).max().item()
 
-    src_norm = vec.norm(dim=-1, keepdim=True)  # [1, 1]
-
-    # Match the preprocessing used during training
-    if normalize_activations:
-        vec = F.normalize(vec, dim=-1)
-
-    with torch.no_grad():
-        if isinstance(translator, LinearTranslator) and not apply_bias:
-            # Direction transport: use the linear part only. The affine bias cancels
-            # for a difference direction, so adding it would inject a spurious shift.
-            out = vec @ translator.W.weight.T
-        else:
-            # Full map. For non-linear translators apply_bias has no effect (no
-            # separable bias); for a LinearTranslator with apply_bias=True this
-            # includes the affine bias (only correct for a raw activation).
-            out = translator(vec)
-        translated = out.squeeze(0).cpu()  # [D_tgt], unit norm if normalize_activations
-
-    # Set the translated vector's magnitude according to norm_mode.
-    s = None
-    if norm_mode == "restore":
-        # Rescale to the source steering vector's original norm.
-        translated = F.normalize(translated, dim=-1) * src_norm.squeeze().cpu()
-    elif norm_mode == "procrustes":
-        # Faithful floor transport s*(W.sv). Requires the stored Procrustes scale.
-        try:
-            s = float(config["translator"]["procrustes_scale"])
-        except KeyError:
-            raise ValueError(
-                "norm_mode='procrustes' requires a checkpoint produced by "
-                "fit_procrustes.py, which stores config.translator.procrustes_scale; "
-                "this checkpoint has no such key. This mode is linear-only."
-            )
-        translated = translated * s
-    # norm_mode == "none": leave the translator output as-is.
+    translated = runner.transport(vec, norm_mode=norm_mode, apply_bias=apply_bias)
 
     # Build output path mirroring activation_engineering structure, saved within this repo
     if output_dir is None:
         output_dir = _PROJECT_ROOT
-    out_layer_dir = (
-        Path(output_dir)
-        / "steering_vectors"
-        / _model_slug(target_model_name)
-        / method
-        / behavior
-        / target_module
-        / f"layer_{target_layer}"
-    )
+    out_pt = sv_path(output_dir, target_model_name, method, behavior, target_module, target_layer)
+    out_layer_dir = out_pt.parent
     out_layer_dir.mkdir(parents=True, exist_ok=True)
 
     # Save translated vector
-    out_pt = out_layer_dir / "sv.pt"
     torch.save(translated, out_pt)
 
     # Save metadata: start from source sv.json if present, then update target fields
-    src_json = sv_path.parent / "sv.json"
+    src_json = sv_path_in.parent / "sv.json"
     meta = {}
     if src_json.exists():
         with open(src_json) as f:
@@ -174,7 +78,7 @@ def translate_steering_vector(sv_path, checkpoint_path, output_dir=None, norm_mo
             "tokenizer": target_model_name,
             "layer_idx": target_layer,
             "module_name": target_module,
-            "translated_from": str(sv_path),
+            "translated_from": str(sv_path_in),
             "translator_checkpoint": str(checkpoint_path),
         }
     )
@@ -185,9 +89,9 @@ def translate_steering_vector(sv_path, checkpoint_path, output_dir=None, norm_mo
 
     norm_info = f"norm={translated.norm().item():.4f} (mode={norm_mode}"
     if norm_mode == "restore":
-        norm_info += f", restored from source norm={src_norm.item():.4f}"
+        norm_info += f", restored from source norm={src_norm:.4f}"
     elif norm_mode == "procrustes":
-        norm_info += f", scale s={s:.4f}"
+        norm_info += f", scale s={runner.procrustes_scale:.4f}"
     norm_info += ")"
     print(f"Translated vector : {out_pt}  {list(translated.shape)}  {norm_info}")
     print(f"Metadata          : {out_json}")
@@ -216,7 +120,7 @@ def main():
     parser.add_argument(
         "--norm-mode",
         dest="norm_mode",
-        choices=["restore", "none", "procrustes"],
+        choices=list(NORM_MODES),
         default="restore",
         help="How to set the translated vector's magnitude. "
              "'restore' (default): rescale to the source vector's original norm. "

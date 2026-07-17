@@ -29,15 +29,11 @@ activation caches):
 """
 
 import argparse
-import sys
-import tomllib
 from pathlib import Path
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).parent))
-
-from src.utils.paths import data_dir_of, resolve_activation_path
+from acttrans.utils.config import load_activations, load_config, resolve_activation_paths
 
 
 # ---------------------------------------------------------------------------
@@ -156,11 +152,6 @@ def space_stats(A: torch.Tensor) -> dict:
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def load_activations(path: Path) -> torch.Tensor:
-    obj = torch.load(path, weights_only=False)
-    return obj["activations"] if isinstance(obj, dict) else obj
-
-
 def resolve_paths(args) -> tuple[Path, Path]:
     if args.source_activations and args.target_activations:
         return Path(args.source_activations), Path(args.target_activations)
@@ -168,20 +159,8 @@ def resolve_paths(args) -> tuple[Path, Path]:
         raise SystemExit(
             "Provide either --config or both --source-activations and --target-activations"
         )
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
-    data_dir = data_dir_of(config)
-    src = (
-        Path(args.source_activations)
-        if args.source_activations
-        else resolve_activation_path(data_dir, config["source_model"], "source")
-    )
-    tgt = (
-        Path(args.target_activations)
-        if args.target_activations
-        else resolve_activation_path(data_dir, config["target_model"], "target")
-    )
-    return src, tgt
+    config = load_config(args.config)
+    return resolve_activation_paths(config, args.source_activations, args.target_activations)
 
 
 def main():

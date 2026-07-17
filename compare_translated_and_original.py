@@ -31,13 +31,9 @@ Results land in outputs/comparison/{geometric,decomposition}/ as CSVs
 """
 
 import argparse
-import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_HERE))
-
-from comparison.common import (  # noqa: E402
+from acttrans.comparison.common import (
     BEHAVIORS,
     DEFAULT_OUT_DIR,
     DEFAULT_TRANSLATOR_GLOB,
@@ -95,7 +91,7 @@ def main():
     out_dir = Path(args.out)
 
     if args.approach in ("geometric", "all"):
-        from comparison import geometric
+        from acttrans.comparison import geometric
         geometric.run(
             translators,
             behaviors=args.behaviors,
@@ -105,7 +101,7 @@ def main():
         )
 
     if args.approach in ("decomposition", "all"):
-        from comparison import decomposition
+        from acttrans.comparison import decomposition
         decomposition.run(
             translators,
             behaviors=args.behaviors,

@@ -1,15 +1,15 @@
-import sys, argparse, tomllib
+import argparse
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent))
-
 import torch
-from src.models.translator import build_translator, save_translator
-from src.training.trainer import train_translator
-from src.utils.paths import data_dir_of, resolve_activation_path, translator_path
+from acttrans.models.translator import build_translator, save_translator
+from acttrans.training.trainer import train_translator
+from acttrans.utils.config import load_activations, load_config, resolve_activation_paths
+from acttrans.utils.paths import translator_path
 
 
 def main():
@@ -32,27 +32,18 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
+    config = load_config(args.config)
 
     output_dir = Path(config["training"]["output_dir"])
-    data_dir = data_dir_of(config)
-    src_path = (
-        Path(args.source_activations)
-        if args.source_activations
-        else resolve_activation_path(data_dir, config["source_model"], "source")
-    )
-    tgt_path = (
-        Path(args.target_activations)
-        if args.target_activations
-        else resolve_activation_path(data_dir, config["target_model"], "target")
+    src_path, tgt_path = resolve_activation_paths(
+        config, args.source_activations, args.target_activations
     )
     output_path = args.output or translator_path(output_dir, config)
 
     print(f"Loading source activations from {src_path}")
     print(f"Loading target activations from {tgt_path}")
-    source = torch.load(src_path, weights_only=False)["activations"]
-    target = torch.load(tgt_path, weights_only=False)["activations"]
+    source = load_activations(src_path)
+    target = load_activations(tgt_path)
     activations = {"source": source, "target": target}
 
     input_dim = source.shape[1]

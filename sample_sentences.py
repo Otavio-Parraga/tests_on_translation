@@ -1,24 +1,19 @@
-import sys, argparse, json, os, tomllib
+import argparse
+import json
 from pathlib import Path
 
 import torch
 from dotenv import load_dotenv
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 load_dotenv()
-sys.path.insert(0, str(Path(__file__).parent))
+
+from acttrans.utils.config import load_config
+from acttrans.utils.hf import load_model_and_tokenizer
 
 
-def sample_from_model(model_cfg, n, device, hf_cache_dir, batch_size, temperature, max_new_tokens):
-    tokenizer = AutoTokenizer.from_pretrained(model_cfg["name"], cache_dir=hf_cache_dir)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_cfg["name"], dtype=torch.bfloat16, cache_dir=hf_cache_dir
-    ).to(device)
+def sample_from_model(model_cfg, n, device, batch_size, temperature, max_new_tokens):
+    model, tokenizer = load_model_and_tokenizer(model_cfg["name"], device)
     model.eval()
 
     bos_id = tokenizer.bos_token_id or tokenizer.eos_token_id
@@ -54,10 +49,8 @@ def main():
     parser.add_argument("--max_new_tokens", type=int, default=64)
     args = parser.parse_args()
 
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
+    config = load_config(args.config)
 
-    hf_cache_dir = os.getenv("HF_CACHE_DIR")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     batch_size = config.get("batch_size", 32)
     output_path = Path(args.output)
@@ -65,12 +58,12 @@ def main():
 
     print(f"Sampling {args.n} sentences from {config['source_model']['name']}...")
     source_sentences = sample_from_model(
-        config["source_model"], args.n, device, hf_cache_dir, batch_size, args.temperature, args.max_new_tokens
+        config["source_model"], args.n, device, batch_size, args.temperature, args.max_new_tokens
     )
 
     print(f"Sampling {args.n} sentences from {config['target_model']['name']}...")
     target_sentences = sample_from_model(
-        config["target_model"], args.n, device, hf_cache_dir, batch_size, args.temperature, args.max_new_tokens
+        config["target_model"], args.n, device, batch_size, args.temperature, args.max_new_tokens
     )
 
     all_sentences = list(dict.fromkeys(source_sentences + target_sentences))

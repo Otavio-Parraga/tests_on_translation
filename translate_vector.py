@@ -1,11 +1,10 @@
 """Translate a .pt activation vector from source to target embedding space."""
-import sys, argparse
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent))
+import argparse
 
 import torch
-from src.models.translator import load_translator
+
+from acttrans.models.translator import load_translator
+
 
 def translate(checkpoint_path, input_path, output_path=None, reverse=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -32,6 +31,7 @@ def translate(checkpoint_path, input_path, output_path=None, reverse=False):
         print(f"Saved translated vector to {output_path}")
     return translated
 
+
 def main():
     parser = argparse.ArgumentParser(description="Translate a .pt activation vector to target model space")
     parser.add_argument("--checkpoint", required=True, help="Path to translator checkpoint")
@@ -46,6 +46,7 @@ def main():
     if args.output is None:
         print(f"(Pass --output to save the result)")
     return result
+
 
 if __name__ == "__main__":
     main()

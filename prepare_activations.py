@@ -1,12 +1,13 @@
-import sys, argparse, tomllib
-from pathlib import Path
+import argparse
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent))
+from acttrans.data.dataset import prepare_paired_activations
+from acttrans.utils.config import load_config
+from acttrans.utils.paths import activation_path, data_dir_of
 
-from src.data.dataset import prepare_paired_activations
 
 def main():
     parser = argparse.ArgumentParser(description="Extract paired activations from two models")
@@ -19,8 +20,7 @@ def main():
                         help="Override target_model.layer from the config (see --source-layer).")
     args = parser.parse_args()
 
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
+    config = load_config(args.config)
 
     if args.source_layer is not None:
         config["source_model"]["layer"] = args.source_layer
@@ -32,11 +32,11 @@ def main():
     print(f"  Target: {config['target_model']['name']} (layer {config['target_model']['layer']})")
 
     result = prepare_paired_activations(config)
-    from src.utils.paths import activation_path, data_dir_of
     data_dir = data_dir_of(config)
     print(f"Done. Source: {result['source'].shape}, Target: {result['target'].shape}")
     print(f"Saved to {activation_path(data_dir, config['source_model'])}")
     print(f"     and {activation_path(data_dir, config['target_model'])}")
+
 
 if __name__ == "__main__":
     main()

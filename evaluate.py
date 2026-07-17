@@ -1,13 +1,14 @@
-import sys, argparse, tomllib
+import argparse
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-sys.path.insert(0, str(Path(__file__).parent))
+from acttrans.evaluation.evaluator import evaluate_from_checkpoint
+from acttrans.utils.config import load_config, resolve_activation_paths
+from acttrans.utils.paths import best_translator_path
 
-from src.evaluation.evaluator import evaluate_from_checkpoint
-from src.utils.paths import data_dir_of, resolve_activation_path, best_translator_path
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate activation translator")
@@ -22,21 +23,12 @@ def main():
                         help="Top-k values to evaluate (default: 1 5 10)")
     args = parser.parse_args()
 
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
+    config = load_config(args.config)
 
     output_dir = Path(config["training"]["output_dir"])
-    data_dir = data_dir_of(config)
     checkpoint_path = args.checkpoint or best_translator_path(output_dir, config)
-    src_path = (
-        Path(args.source_activations)
-        if args.source_activations
-        else resolve_activation_path(data_dir, config["source_model"], "source")
-    )
-    tgt_path = (
-        Path(args.target_activations)
-        if args.target_activations
-        else resolve_activation_path(data_dir, config["target_model"], "target")
+    src_path, tgt_path = resolve_activation_paths(
+        config, args.source_activations, args.target_activations
     )
 
     print(f"Evaluating checkpoint: {checkpoint_path}")
@@ -48,6 +40,7 @@ def main():
         ks=args.ks,
     )
     return results
+
 
 if __name__ == "__main__":
     main()

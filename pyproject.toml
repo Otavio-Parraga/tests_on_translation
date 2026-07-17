@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acttrans"
+version = "0.1.0"
+description = "Activation-space translation between LLMs: train translators and transport steering vectors"
+readme = "README.md"
+requires-python = ">=3.11"
+# NOTE: the runtime environment is the `acteng` conda env, which already ships
+# torch/transformers/etc. Install with `pip install -e . --no-deps` so pip
+# never touches the conda-managed packages. The list below documents what the
+# package needs, it is not meant to drive resolution inside that env.
+dependencies = [
+    "torch",
+    "transformers",
+    "datasets",
+    "pandas",
+    "tqdm",
+    "python-dotenv",
+    "tensorboard",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

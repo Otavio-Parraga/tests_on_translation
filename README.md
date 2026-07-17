@@ -272,28 +272,62 @@ Stochastic decoding from BOS covers both models' natural output distributions an
 
 ---
 
+## Installation
+
+The library code lives in the installable `acttrans` package. The runtime
+environment is the `acteng` conda env (which already ships torch, transformers,
+etc.), so install without touching its dependencies:
+
+```bash
+conda run -n acteng pip install -e . --no-deps
+```
+
+Every entry point is a script at the repo root; run them from the repo root
+(paths in the configs are relative to it).
+
 ## Project Structure
 
 ```
+├── pyproject.toml               Installable package definition (pip install -e . --no-deps)
 ├── prepare_activations.py       Extract paired activations from source and target models
 ├── sample_sentences.py          Generate training sentences via stochastic decoding
 ├── train.py                     Train the translator
 ├── evaluate.py                  Evaluate top-k retrieval accuracy on saved activations
+├── fit_procrustes.py            Closed-form orthogonal-Procrustes linear baseline
+├── diagnose_alignment.py        Stage-0 alignment diagnostics (CKA, mutual k-NN, collapse)
 ├── translate_vector.py          Translate a bare .pt tensor
 ├── translate_steering_vector.py Translate a steering vector (activation_engineering layout)
+├── ab_comparison.py             A/B eval: original vs translated SV, one behavior
+├── ab_sweep.py                  Full A/B steering sweep over all translators (resumable)
+├── ab_report.py                 Tables + HTML report from ab_sweep results
+├── compare_translated_and_original.py  Geometric/decomposition SV comparison
 ├── config/
 │   ├── default.toml             MSE loss, MWE dataset
 │   ├── generated.toml           MSE loss, model-generated sentences
 │   ├── combined.toml            MSE + InfoNCE
-│   └── cosine.toml              Cosine loss
-├── src/
-│   ├── data/dataset.py          Activation extraction with batch-level resume
-│   ├── models/translator.py     MLPTranslator, EncoderTranslator, SparseAutoencoderTranslator
+│   ├── cosine.toml              Cosine loss
+│   ├── sweep_common.py          Shared blocks for the two sweep generators
+│   ├── generate_fineweb_configs.py     arch x loss x pooling sweep -> config/fineweb/
+│   └── generate_loss_combo_configs.py  compound-loss sweep -> config/loss_combos/
+├── src/acttrans/                The installable package
+│   ├── constants.py             Fixed experiment grid (model pair, layer, behaviors)
+│   ├── data/
+│   │   ├── dataset.py           Activation extraction with batch-level resume
+│   │   └── split.py             The seeded train/val split shared by all entry points
+│   ├── models/
+│   │   ├── translator.py        MLP/Encoder/SAE/Flow/Linear translators + Procrustes fit
+│   │   └── transport.py         TranslatorRunner: in-memory direction transport
 │   ├── training/trainer.py      Training loop with TensorBoard logging
-│   ├── utils/paths.py           Output path conventions (per-model / per-experiment)
-│   └── evaluation/
-│       ├── evaluator.py         Checkpoint evaluation entry point
-│       └── metrics.py           Top-k retrieval accuracy
+│   ├── evaluation/
+│   │   ├── evaluator.py         Checkpoint evaluation entry point
+│   │   ├── metrics.py           Top-k retrieval accuracy
+│   │   └── ab_eval.py           Steering hook + closed-ended A/B evaluation
+│   ├── comparison/              Translated-vs-native SV analyses (geometric, decomposition)
+│   └── utils/
+│       ├── paths.py             Path/slug conventions (per-model / per-experiment / SV trees)
+│       ├── config.py            TOML loading + activation-cache resolution
+│       ├── checkpoints.py       Translator checkpoint discovery/metadata parsing
+│       └── hf.py                HF model/tokenizer loading + layer lookup
 └── outputs/<sentence_set>/      One directory per sentence set (holds sentences.json)
     ├── activations/
     │   ├── <SrcModel>_l<layer>.pt   Per-model activation cache (shared across experiments)

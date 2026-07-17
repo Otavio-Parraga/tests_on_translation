@@ -1,5 +1,3 @@
-import sys
-import argparse
 import datetime
 from pathlib import Path
 
@@ -11,14 +9,10 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-try:
-    from src.evaluation.metrics import compute_retrieval_metrics
-except ImportError:
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from src.evaluation.metrics import compute_retrieval_metrics
+from ..data.split import split_paired_activations
+from ..evaluation.metrics import compute_retrieval_metrics
+from ..models.translator import save_translator
+from ..utils.paths import best_translator_path, loss_tag, model_slug, resolve_losses
 
 
 def _make_loss_fn(loss_type, temperature):
@@ -90,10 +84,8 @@ def train_translator(activations_dict, config, translator_model):
     epochs = tcfg["epochs"]
     output_dir = Path(tcfg["output_dir"])
     normalize_activations = tcfg.get("normalize_activations", False)
-    # Support both `losses` (list) and legacy `loss` (single string)
-    raw_losses = tcfg.get("losses") or [tcfg.get("loss", "mse")]
-    loss_names = raw_losses if isinstance(raw_losses, list) else [raw_losses]
-    loss_weights = tcfg.get("loss_weights", [1.0] * len(loss_names))
+    # Supports both `losses` (list) and legacy `loss` (single string).
+    loss_names, loss_weights = resolve_losses(tcfg)
     temperature = tcfg.get("temperature", 0.07)
     grad_clip = tcfg.get("grad_clip", 0.0)
     lr_warmup_epochs = tcfg.get("lr_warmup_epochs", 0)
@@ -122,17 +114,9 @@ def train_translator(activations_dict, config, translator_model):
     if normalize_activations:
         source = F.normalize(source, dim=-1)
         target = F.normalize(target, dim=-1)
-    N = source.shape[0]
 
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-    perm = torch.randperm(N, generator=generator)
-    source = source[perm]
-    target = target[perm]
-
-    n_train = int(N * train_ratio)
-    train_src, val_src = source[:n_train], source[n_train:]
-    train_tgt, val_tgt = target[:n_train], target[n_train:]
+    train_src, train_tgt, val_src, val_tgt = split_paired_activations(source, target, config)
+    n_train = train_src.shape[0]
 
     train_loader = DataLoader(
         ActivationDataset(train_src, train_tgt),
@@ -208,21 +192,9 @@ def train_translator(activations_dict, config, translator_model):
     epochs_since_improvement = 0
     global_step = 0
 
-    try:
-        from src.models.translator import save_translator
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from src.models.translator import save_translator
-
     src_cfg = config.get("source_model", {})
     tgt_cfg = config.get("target_model", {})
     tr_cfg = config.get("translator", {})
-
-    try:
-        from src.utils.paths import best_translator_path, model_slug
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from src.utils.paths import best_translator_path, model_slug
 
     # Experiment-named (pair + type + loss) so multiple translators coexist in one dir.
     checkpoint_path = best_translator_path(output_dir, config)
@@ -231,10 +203,9 @@ def train_translator(activations_dict, config, translator_model):
     # land in distinct TensorBoard run dirs.
     src_tag = model_slug(src_cfg)
     tgt_tag = model_slug(tgt_cfg)
-    loss_tag = "+".join(loss_names)
     tr_type = tr_cfg.get("type", "mlp")
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    run_name = f"{timestamp}__{src_tag}__{tgt_tag}__{tr_type}__{loss_tag}"
+    run_name = f"{timestamp}__{src_tag}__{tgt_tag}__{tr_type}__{loss_tag(config)}"
     run_dir = output_dir / "tensorboard" / run_name
     writer = SummaryWriter(log_dir=str(run_dir))
     print(f"TensorBoard run: {run_dir}")
@@ -376,29 +347,3 @@ def train_translator(activations_dict, config, translator_model):
     model.load_state_dict(best_ckpt["state_dict"])
 
     return model, train_losses, val_losses
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--activations", required=True)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args()
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from src.models.translator import build_translator, save_translator
-
-    import tomllib
-
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
-
-    activations_dict = torch.load(args.activations)
-    input_dim = activations_dict["source"].shape[1]
-    output_dim = activations_dict["target"].shape[1]
-
-    model = build_translator(config, input_dim=input_dim, output_dim=output_dim)
-    model, _, _ = train_translator(activations_dict, config, model)
-
-    save_translator(model, args.output, config, input_dim, output_dim)
-    print(f"Saved final model to {args.output}")

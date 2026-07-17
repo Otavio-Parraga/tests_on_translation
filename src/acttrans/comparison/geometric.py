@@ -98,7 +98,7 @@ def run(
 
     for info in translators:
         print(f"\n=== {info.name} ===")
-        runner = TranslatorRunner(info, device=device)
+        runner = TranslatorRunner(info.path, device=device)
         norm_mode = runner.default_norm_mode()
         mean_dir = mean_activation_direction(
             TARGET_MODEL, layer=info.tgt_layer, pooling=info.pooling

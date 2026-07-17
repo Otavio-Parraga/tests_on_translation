@@ -20,9 +20,9 @@ at that target layer, so checkpoints fitted with `fit_procrustes.py
 Results stream to a JSONL file (one row per scope/translator/norm/behavior/coeff),
 so the run is fully resumable: re-running skips combinations already present.
 
-The heavy A/B machinery (steering hook, prompt construction, P(match) metric) is
-imported verbatim from ab_comparison.py so this stays faithful to the
-activation_engineering evaluation.
+The heavy A/B machinery (steering hook, prompt construction, P(match) metric)
+lives in acttrans.evaluation.ab_eval — the same code ab_comparison.py runs — so
+this stays faithful to the activation_engineering evaluation.
 
 Usage:
     conda run -n acteng python ab_sweep.py                       # everything
@@ -36,40 +36,25 @@ Then build the comparison tables/plots:
 """
 
 import argparse
-import glob
 import json
-import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 import torch
 
-# Reuse the faithful A/B machinery and the translation routine.
-from ab_comparison import _load_model, run_ab_eval, ABResult
+# The faithful A/B machinery, the shared experiment grid and the translation routine.
+from acttrans.constants import BEHAVIORS, LAYER, METHOD, MODULE, SOURCE_MODEL, TARGET_MODEL
+from acttrans.evaluation.ab_eval import aggregate_by_coefficient, run_ab_eval
+from acttrans.utils.checkpoints import TranslatorInfo, discover_translators
+from acttrans.utils.hf import load_model_and_tokenizer
+from acttrans.utils.paths import sv_path
 from translate_steering_vector import translate_steering_vector
 
 _HERE = Path(__file__).resolve().parent
 _ACTENG = _HERE.parent / "activation_engineering"
 
-# ── Fixed experiment grid ────────────────────────────────────────────────────
-
-SOURCE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-TARGET_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-SOURCE_LAYER = 8          # CAA SVs were extracted at layer 8
-MODULE = "residual"
-METHOD = "CAA"
-
-BEHAVIORS = [
-    "coordinate-other-ais",
-    "corrigible-neutral-HHH",
-    "hallucination",
-    "myopic-reward",
-    "refusal",
-    "survival-instinct",
-    "sycophancy",
-]
+SOURCE_LAYER = LAYER      # CAA SVs were extracted at layer 8
 
 # -1000 .. -0.25, 0, 0.25 .. 1000  (symmetric grid requested by the user)
 _MAG = [1000, 500, 250, 100, 50, 10, 5, 2, 1, 0.75, 0.50, 0.25]
@@ -105,74 +90,8 @@ def transport_modes(ttype: str) -> List[TransportMode]:
     ]
 
 
-# ── Translator checkpoint metadata ───────────────────────────────────────────
-
-@dataclass
-class Translator:
-    path: Path
-    name: str          # checkpoint stem (unique id)
-    ttype: str         # mlp | encoder | flow | sae | linear
-    loss: str          # mse | cosine | info_nce | procrustes*
-    pooling: str       # last | mean
-    src_layer: int     # layer the source SV/activations were extracted at
-    tgt_layer: int     # layer the translated SV is injected at on the target
-
-
-_CKPT_RE = re.compile(
-    r"best_translator__(?P<src>.+?)__(?P<tgt>.+?)__(?P<type>mlp|encoder|flow|sae|linear)__(?P<loss>.+)$"
-)
-_LAYER_RE = re.compile(r"_l(\d+)(?:_mean)?$")
-
-
-def parse_translator(path: Path) -> Translator:
-    stem = path.stem  # strips .pt
-    m = _CKPT_RE.match(stem)
-    if not m:
-        raise ValueError(f"Cannot parse translator filename: {path.name}")
-    layers = []
-    for slug in (m.group("src"), m.group("tgt")):
-        lm = _LAYER_RE.search(slug)
-        if not lm:
-            raise ValueError(f"Cannot parse layer from model slug {slug!r} in {path.name}")
-        layers.append(int(lm.group(1)))
-    pooling = "mean" if m.group("src").endswith("_mean") else "last"
-    return Translator(
-        path=path,
-        name=stem,
-        ttype=m.group("type"),
-        loss=m.group("loss"),
-        pooling=pooling,
-        src_layer=layers[0],
-        tgt_layer=layers[1],
-    )
-
-
-def discover_translators(patterns: List[str]) -> List[Translator]:
-    paths: List[Path] = []
-    for pat in patterns:
-        paths.extend(Path(p) for p in glob.glob(pat))
-    # de-dup + stable order
-    uniq = sorted({p.resolve() for p in paths})
-    return [parse_translator(p) for p in uniq]
-
-
 # ── Result rows + resumable JSONL ────────────────────────────────────────────
-
-def _aggregate(results: List[ABResult]) -> dict:
-    """coeff -> {avg_p_match, accuracy, n} for one eval run."""
-    from collections import defaultdict
-    by = defaultdict(list)
-    for r in results:
-        by[r.coefficient].append(r)
-    out = {}
-    for c, items in by.items():
-        out[c] = {
-            "avg_p_match": sum(r.behavior_prob for r in items) / len(items),
-            "accuracy": sum(1 for r in items if r.is_match) / len(items),
-            "n": len(items),
-        }
-    return out
-
+# (Checkpoint metadata parsing lives in acttrans.utils.checkpoints.)
 
 def _combo_key(row: dict) -> str:
     """Stable identity for a (scope, translator, norm, behavior) eval block."""
@@ -207,7 +126,7 @@ def _source_label(layer: int) -> str:
     return "" if layer == SOURCE_LAYER else f"source_l{layer}"
 
 
-def _emit(scope, translator: Optional[Translator], norm_mode, behavior,
+def _emit(scope, translator: Optional[TranslatorInfo], norm_mode, behavior,
           agg: dict, sv_norm: float, source_layer: int = SOURCE_LAYER) -> List[dict]:
     if translator:
         source_layer = translator.src_layer
@@ -231,7 +150,7 @@ def _emit(scope, translator: Optional[Translator], norm_mode, behavior,
 
 # ── Phases ───────────────────────────────────────────────────────────────────
 
-def phase_translate(translators: List[Translator], out_root: Path,
+def phase_translate(translators: List[TranslatorInfo], out_root: Path,
                     behaviors: List[str]) -> dict:
     """Translate every (translator, behavior, transport-mode) SV. Returns nested
     dict of translated sv paths + norms:
@@ -248,12 +167,7 @@ def phase_translate(translators: List[Translator], out_root: Path,
             # unique output root per (translator, mode) avoids path collisions
             tr_out = out_root / "translated" / f"{tr.name}__{mode.label}"
             for behavior in behaviors:
-                src_sv = (
-                    _ACTENG / "steering_vectors"
-                    / SOURCE_MODEL.replace("/", "_")
-                    / METHOD / behavior / MODULE
-                    / f"layer_{tr.src_layer}" / "sv.pt"
-                )
+                src_sv = sv_path(_ACTENG, SOURCE_MODEL, METHOD, behavior, MODULE, tr.src_layer)
                 if not src_sv.exists():
                     print(f"  !! missing source SV: {src_sv}")
                     continue
@@ -290,10 +204,7 @@ def phase_source(source_layers, behaviors, coefficients, limit, device,
     model, tok = _load_model_on(SOURCE_MODEL, device)
     try:
         for layer, behavior in todo:
-            src_sv = (
-                _ACTENG / "steering_vectors" / SOURCE_MODEL.replace("/", "_")
-                / METHOD / behavior / MODULE / f"layer_{layer}" / "sv.pt"
-            )
+            src_sv = sv_path(_ACTENG, SOURCE_MODEL, METHOD, behavior, MODULE, layer)
             if not src_sv.exists():
                 print(f"  !! missing source SV: {src_sv}")
                 continue
@@ -302,7 +213,7 @@ def phase_source(source_layers, behaviors, coefficients, limit, device,
             print(f"  [source] l{layer} / {behavior}  ({len(items)} items)")
             results = run_ab_eval(model, tok, items, sv, layer, MODULE,
                                   coefficients, limit=limit)
-            rows = _emit("source", None, "", behavior, _aggregate(results),
+            rows = _emit("source", None, "", behavior, aggregate_by_coefficient(results),
                          float(sv.norm().item()), source_layer=layer)
             _append_rows(jsonl_path, rows)
     finally:
@@ -329,19 +240,19 @@ def phase_target(translators, table, behaviors, coefficients, limit, device,
                     entry = table.get(tr.name, {}).get(mode.label, {}).get(behavior)
                     if entry is None:
                         continue
-                    sv_path, sv_norm = entry
-                    sv = torch.load(sv_path, map_location=model.device,
+                    sv_file, sv_norm = entry
+                    sv = torch.load(sv_file, map_location=model.device,
                                     weights_only=True)
                     # inject layer comes from the translated SV's own path (set by
                     # the translator's config, i.e. the checkpoint's target layer)
-                    tlayer = _target_layer_of(sv_path)
+                    tlayer = _target_layer_of(sv_file)
                     items = _load_test_items(behavior)
                     print(f"  [target] {tr.name} / {mode.label} / {behavior} "
                           f"(L{tlayer}, |sv|={sv_norm:.3f})")
                     results = run_ab_eval(model, tok, items, sv, tlayer, MODULE,
                                           coefficients, limit=limit)
                     rows = _emit("target", tr, mode.label, behavior,
-                                 _aggregate(results), sv_norm)
+                                 aggregate_by_coefficient(results), sv_norm)
                     _append_rows(jsonl_path, rows)
                     done.add(key)
     finally:
@@ -349,9 +260,9 @@ def phase_target(translators, table, behaviors, coefficients, limit, device,
         torch.cuda.empty_cache()
 
 
-def _target_layer_of(sv_path: Path) -> int:
+def _target_layer_of(sv_file: Path) -> int:
     """layer_{idx} is the parent's parent dir name of sv.pt."""
-    for part in sv_path.parts:
+    for part in sv_file.parts:
         if part.startswith("layer_"):
             return int(part.split("_", 1)[1])
     return SOURCE_LAYER
@@ -360,17 +271,8 @@ def _target_layer_of(sv_path: Path) -> int:
 # ── Model loading honoring an explicit device ────────────────────────────────
 
 def _load_model_on(model_name: str, device: str):
-    """Like ab_comparison._load_model but onto an explicit device."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    cache = os.getenv("HF_CACHE_DIR")
     print(f"  Loading {model_name} on {device} …")
-    tok = AutoTokenizer.from_pretrained(model_name, cache_dir=cache)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16, cache_dir=cache
-    ).to(device)
-    tok.pad_token = tok.eos_token
-    tok.pad_token_id = tok.eos_token_id
-    return model, tok
+    return load_model_and_tokenizer(model_name, device)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -431,9 +333,7 @@ def main():
                 table[tr.name][mode.label] = {}
                 tr_out = out_root / "translated" / f"{tr.name}__{mode.label}"
                 for behavior in args.behaviors:
-                    sv_pt = (tr_out / "steering_vectors"
-                             / TARGET_MODEL.replace("/", "_") / METHOD / behavior
-                             / MODULE / f"layer_{tgt_layer}" / "sv.pt")
+                    sv_pt = sv_path(tr_out, TARGET_MODEL, METHOD, behavior, MODULE, tgt_layer)
                     if sv_pt.exists():
                         v = torch.load(sv_pt, map_location="cpu", weights_only=True)
                         table[tr.name][mode.label][behavior] = (sv_pt, float(v.norm()))

@@ -13,26 +13,27 @@ The checkpoint is saved (with ``translator.type = "linear"`` injected) via
 ``save_translator`` so ``translate_steering_vector.py`` and the ab-sweep loader
 pick it up unchanged: ``outputs/fineweb/best_translator__..__linear__..pt``.
 """
-import sys, argparse, tomllib
+import argparse
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 load_dotenv()
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 import copy
 import torch
 import torch.nn.functional as F
 
-from src.models.translator import (
+from acttrans.data.split import split_paired_activations
+from acttrans.evaluation.metrics import compute_retrieval_metrics
+from acttrans.models.translator import (
     build_translator,
     save_translator,
     fit_orthogonal_procrustes,
     procrustes_scale,
 )
-from src.utils.paths import data_dir_of, resolve_activation_path, best_translator_path
-from src.evaluation.metrics import compute_retrieval_metrics
+from acttrans.utils.config import load_activations, load_config, resolve_activation_paths
+from acttrans.utils.paths import best_translator_path
 
 
 def main():
@@ -63,8 +64,7 @@ def main():
                              "(W^T W != I).")
     args = parser.parse_args()
 
-    with open(args.config, "rb") as f:
-        config = tomllib.load(f)
+    config = load_config(args.config)
 
     # Force the translator to the linear/Procrustes baseline so the checkpoint is
     # rebuilt as a LinearTranslator by build_translator on load, and so the slug
@@ -96,11 +96,9 @@ def main():
         config["training"].pop("loss", None)  # ensure loss_tag uses `losses`
 
     output_dir = Path(config["training"]["output_dir"])
-    data_dir = data_dir_of(config)
-    src_path = (Path(args.source_activations) if args.source_activations
-                else resolve_activation_path(data_dir, config["source_model"], "source"))
-    tgt_path = (Path(args.target_activations) if args.target_activations
-                else resolve_activation_path(data_dir, config["target_model"], "target"))
+    src_path, tgt_path = resolve_activation_paths(
+        config, args.source_activations, args.target_activations
+    )
     output_path = Path(args.output) if args.output else best_translator_path(output_dir, config)
 
     for path, mcfg in ((src_path, config["source_model"]), (tgt_path, config["target_model"])):
@@ -114,8 +112,8 @@ def main():
 
     print(f"Loading source activations from {src_path}")
     print(f"Loading target activations from {tgt_path}")
-    source = torch.load(src_path, weights_only=False)["activations"].float()
-    target = torch.load(tgt_path, weights_only=False)["activations"].float()
+    source = load_activations(src_path).float()
+    target = load_activations(tgt_path).float()
 
     # Match train.py / trainer preprocessing so the baseline is comparable.
     normalize_activations = config.get("training", {}).get("normalize_activations", False)
@@ -129,16 +127,8 @@ def main():
     print(f"Input dim: {input_dim}, Output dim: {output_dim}, N={source.shape[0]}")
 
     # Held-out split mirroring the trainer (same seed + ratio) so numbers are comparable.
-    tcfg = config.get("training", {})
-    seed = tcfg.get("seed", 42)
-    train_ratio = tcfg.get("train_ratio", 0.8)
-    generator = torch.Generator()
-    generator.manual_seed(seed)
-    perm = torch.randperm(source.shape[0], generator=generator)
-    source, target = source[perm], target[perm]
-    n_train = int(source.shape[0] * train_ratio)
-    train_src, val_src = source[:n_train], source[n_train:]
-    train_tgt, val_tgt = target[:n_train], target[n_train:]
+    train_src, train_tgt, val_src, val_tgt = split_paired_activations(source, target, config)
+    n_train = train_src.shape[0]
 
     variant = "whitened (anisotropy-aware)" if args.whiten else "orthogonal"
     print(f"Fitting {variant} Procrustes (center={args.center}, bias={args.bias}, "

@@ -77,11 +77,20 @@ def translator_pair_slug(source_cfg, target_cfg) -> str:
     return f"{model_slug(source_cfg)}__{model_slug(target_cfg)}"
 
 
-def loss_tag(config) -> str:
-    """Loss identifier, mirroring the trainer: '+'-joined loss names (e.g. 'mse', 'mse+info_nce')."""
-    tcfg = config.get("training", {})
+def resolve_losses(tcfg) -> tuple:
+    """Resolve the training losses from a [training] table: supports `losses`
+    (list) and the legacy `loss` (single string). Returns (names, weights);
+    weights default to 1.0 per loss. Single source of truth for the trainer
+    and for the loss tag baked into checkpoint filenames."""
     raw = tcfg.get("losses") or [tcfg.get("loss", "mse")]
     names = raw if isinstance(raw, list) else [raw]
+    weights = tcfg.get("loss_weights", [1.0] * len(names))
+    return names, weights
+
+
+def loss_tag(config) -> str:
+    """Loss identifier: '+'-joined loss names (e.g. 'mse', 'mse+info_nce')."""
+    names, _ = resolve_losses(config.get("training", {}))
     return "+".join(names)
 
 
@@ -103,3 +112,50 @@ def best_translator_path(output_dir, config) -> Path:
 
 def translator_path(output_dir, config) -> Path:
     return Path(output_dir) / f"translator__{experiment_slug(config)}.pt"
+
+
+def sv_path(root, model_name: str, method: str, behavior: str, module: str, layer: int) -> Path:
+    """A steering vector inside an activation_engineering-style tree:
+
+        {root}/steering_vectors/{model}/{method}/{behavior}/{module}/layer_{idx}/sv.pt
+
+    where {model} is the HF name with '/' replaced by '_'. This layout is shared
+    by the source vectors (activation_engineering repo) and the translated ones
+    written by translate_steering_vector.py."""
+    return (
+        Path(root)
+        / "steering_vectors"
+        / model_name.replace("/", "_")
+        / method
+        / behavior
+        / module
+        / f"layer_{layer}"
+        / "sv.pt"
+    )
+
+
+def parse_sv_path(sv_path: Path) -> tuple:
+    """Inverse of ``sv_path``: extract (model_slug, method, behavior, module,
+    layer_idx) from an sv.pt path inside a steering_vectors/ tree."""
+    parts = Path(sv_path).parts
+    try:
+        root_idx = parts.index("steering_vectors")
+    except ValueError:
+        raise ValueError(f"'steering_vectors' not found in path: {sv_path}")
+
+    rel = parts[root_idx + 1:]
+    # Expected: {model}/{method}/{behavior}/{module}/layer_{idx}/sv.pt
+    if len(rel) < 6:
+        raise ValueError(
+            "Unexpected path structure. Expected:\n"
+            "  steering_vectors/{model}/{method}/{behavior}/{module}/layer_{idx}/sv.pt\n"
+            f"Got: {sv_path}"
+        )
+
+    model_slug, method, behavior, module, layer_part = rel[0], rel[1], rel[2], rel[3], rel[4]
+
+    if not layer_part.startswith("layer_"):
+        raise ValueError(f"Expected 'layer_{{idx}}', got: {layer_part!r}")
+    layer_idx = int(layer_part.split("_", 1)[1])
+
+    return model_slug, method, behavior, module, layer_idx
