@@ -24,7 +24,7 @@ import copy
 import torch
 import torch.nn.functional as F
 
-from acttrans.data.split import split_paired_activations
+from acttrans.data.split import preprocess_activations, split_paired_activations
 from acttrans.evaluation.metrics import compute_retrieval_metrics
 from acttrans.models.translator import (
     build_translator,
@@ -116,11 +116,9 @@ def main():
     target = load_activations(tgt_path).float()
 
     # Match train.py / trainer preprocessing so the baseline is comparable.
-    normalize_activations = config.get("training", {}).get("normalize_activations", False)
-    if normalize_activations:
+    if config.get("training", {}).get("normalize_activations", False):
         print("normalize_activations=True -> L2-normalizing activations (matches trainer)")
-        source = F.normalize(source, dim=-1)
-        target = F.normalize(target, dim=-1)
+    source, target = preprocess_activations(source, target, config)
 
     input_dim = source.shape[1]
     output_dim = target.shape[1]

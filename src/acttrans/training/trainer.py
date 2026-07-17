@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from ..data.split import split_paired_activations
+from ..data.split import preprocess_activations, split_paired_activations
 from ..evaluation.metrics import compute_retrieval_metrics
 from ..models.translator import save_translator
 from ..utils.paths import best_translator_path, loss_tag, model_slug, resolve_losses
@@ -111,9 +111,7 @@ def train_translator(activations_dict, config, translator_model):
 
     source = activations_dict["source"].float()
     target = activations_dict["target"].float()
-    if normalize_activations:
-        source = F.normalize(source, dim=-1)
-        target = F.normalize(target, dim=-1)
+    source, target = preprocess_activations(source, target, config)
 
     train_src, train_tgt, val_src, val_tgt = split_paired_activations(source, target, config)
     n_train = train_src.shape[0]
