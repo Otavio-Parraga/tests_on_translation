@@ -1,0 +1,51 @@
+# HuggingFace model cache directory — mirrors HF_CACHE_DIR env var used in activation_engineering
+# Set the env var before running: export HF_CACHE_DIR=/path/to/hf_cache
+
+batch_size = 32
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "google/gemma-3-1B-it"
+layer = 8
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "MWE"
+# behaviors = ["sycophancy_on_nlp_survey", "survival-instinct"]  # omit or set [] for all behaviors
+behaviors = []
+split = "generate"
+data_root = "/home/parraga/projects/activation_engineering/data"
+#limit = 500
+
+[translator]
+type = "mlp"
+hidden_dims = [2048, 2048, 2048]
+dropout = 0.1
+activation = "gelu"
+use_residual = false
+# encoder-specific (ignored for mlp)
+d_model = 512
+nhead = 8
+num_layers = 4
+
+[training]
+epochs = 1000
+batch_size = 2048
+lr = 1e-4
+weight_decay = 1e-4
+train_ratio = 0.8
+seed = 42
+output_dir = "outputs/"   # translator checkpoints + tensorboard logs
+data_dir = "data/"        # sentences.json + activation caches
+normalize_activations = true
+losses = ["cosine"]      # list of "mse" | "cosine" | "info_nce"; combined as weighted sum
+loss_weights = [1.0]       # one weight per entry in losses; e.g. losses=["mse","info_nce"], loss_weights=[1.0,0.1]
+temperature = 0.1         # InfoNCE temperature; only used when "info_nce" is in losses
+grad_clip = 1.0            # max gradient norm; 0.0 to disable
+lr_warmup_epochs = 10       # linear warmup before cosine decay; 0 to disable

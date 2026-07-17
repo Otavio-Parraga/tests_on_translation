@@ -1,0 +1,51 @@
+# FineWeb-edu (sample-10BT) corpus for learning a generic activation-space translator.
+# The HF datasets cache is pinned to HF_CACHE_DIR — the same cache the models use.
+# Set it before running:  export HF_CACHE_DIR=/path/to/hf_cache
+
+batch_size = 32
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "google/gemma-3-1B-it"
+layer = 8
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset is fixed to fineweb-edu/sample-10BT
+limit = 30000           # caps streamed sentences on the chosen split; required in practice
+
+[translator]
+type = "mlp"
+hidden_dims = [2048, 2048, 2048]
+dropout = 0.1
+activation = "gelu"
+use_residual = false
+# encoder-specific (ignored for mlp)
+d_model = 512
+nhead = 8
+num_layers = 4
+
+[training]
+epochs = 1000
+batch_size = 2048
+lr = 1e-4
+weight_decay = 1e-4
+train_ratio = 0.8
+seed = 42
+output_dir = "outputs/"   # translator checkpoints + tensorboard logs
+data_dir = "data/"        # sentences.json + activation caches
+normalize_activations = true
+losses = ["mse"]
+loss_weights = [1.0]
+temperature = 0.1
+grad_clip = 1.0
+lr_warmup_epochs = 10

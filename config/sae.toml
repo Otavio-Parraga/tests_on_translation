@@ -1,0 +1,47 @@
+# Sparse-autoencoder translator between both Llama models on the 30k sentence set:
+#   Llama-3.2-1B src (2048) -> sparse latent (16384) -> Llama-3.2-3B trg (3072)
+# 8x overcomplete bottleneck (the common default in the SAE literature, e.g.
+# Llama Scope LXA-8x); the sparsity constraint is meant to split superposed concepts.
+# Source activations are reused from the 30k cache; only the SAE translator is new.
+
+batch_size = 8   # extraction batch size (3B lm_head OOMs at 32 on 11 GB GPU)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "meta-llama/Llama-3.2-3B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "GENERATED"
+data_root = "data/generated_30k/sentences.json"
+
+[translator]
+type = "sae"
+latent_dim = 16384         # 8x overcomplete bottleneck (8 * 2048)
+sae_activation = "topk"    # "topk" (architectural sparsity) | "l1" (penalty-based)
+k = 64                     # active latents per sample when sae_activation = "topk"
+l1_coeff = 1e-3            # sparsity penalty weight when sae_activation = "l1"
+normalize_decoder = true   # unit-norm decoder atoms so L1 isn't gamed by rescaling
+
+[training]
+epochs = 1000
+batch_size = 2048
+lr = 1e-4
+weight_decay = 1e-4
+train_ratio = 0.8
+seed = 42
+output_dir = "outputs/generated_30k"   # translator checkpoints + tensorboard logs
+data_dir = "data/generated_30k"        # sentences.json + activation caches
+normalize_activations = true
+losses = ["mse"]
+loss_weights = [1.0]
+temperature = 0.1
+grad_clip = 1.0
+lr_warmup_epochs = 10

@@ -1,0 +1,18 @@
+# Byte-code / packaging
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Secrets (symlink to activation_engineering/.env)
+.env
+
+# Large generated artifacts — regenerable, never committed
+data/
+outputs/
+steering_vectors/
+
+# Logs
+*.log
+log_fineweb.txt
