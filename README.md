@@ -250,6 +250,61 @@ The input can be a 1-D vector `[D]` or a batch `[N, D]`; a 1-D input is unsqueez
 
 ---
 
+## Discovery Methods (CAA, RepE, GCAV)
+
+`{method}` in the paths above is a real dimension, not a constant. Three of
+`activation_engineering`'s steering-vector discovery methods are supported, listed in
+`acttrans.constants.METHODS`:
+
+| Method | How the direction is found | Saved shape | Norm |
+|---|---|---|---|
+| **CAA** | mean of per-pair (positive − negative) activation differences | `[1, D]` | its own, behavior-dependent (~0.2–5) |
+| **RepE** | 1st principal component of sign-alternated, per-pair-normalized differences (LAT) | `[1, D]` | 1 by construction |
+| **GCAV** | normal of a logistic-regression boundary separating positive from negative activations | `[D]` | 1 (explicitly normalized) |
+
+All three are a *single flat direction in the residual stream* per
+`(model, behavior, layer)`, built from the same CAA contrastive dataset, and applied
+with an additive hook — which is exactly why they share this tooling unchanged.
+`load_sv` squeezes dim 0, so the `[1, D]` / `[D]` split needs no special casing.
+
+```bash
+# geometric + decomposition comparison across methods (cheap, CPU)
+python compare_translated_and_original.py all --methods CAA RepE GCAV
+
+# A/B steering sweep across methods (one row per method/scope/translator/behavior/coeff)
+python ab_sweep.py --methods CAA RepE GCAV --with-native
+
+# per-method report (single method per page), then the cross-method view
+python ab_report.py   --results outputs/ab_eval/methods/results.jsonl --methods RepE
+python method_report.py --results outputs/ab_eval/methods/results.jsonl
+```
+
+### The one thing that is not comparable across methods: scale
+
+A CAA vector carries its own magnitude while RepE and GCAV are unit vectors, so
+**the same `coefficient` is a different physical perturbation per method.** Anything
+that compares methods must correct for this; anything that compares translators
+*within* one method need not.
+
+- **Cosine-based analysis** (`compare_translated_and_original.py` → `geometric`,
+  `decomposition`) is scale-free, so it is method-comparable as-is. Every output
+  table gains a leading `method` column.
+- **A/B steering** is not. `method_report.py` therefore reads each run on
+  `dose = coefficient × sv_norm` and scores it by
+  `dP_peak = maxᶜ[P(match|+c) − P(match|−c)]` — the best swing at *any* dose, with
+  the dose reported alongside. Because a collapsed model has `P(match) → 0` on both
+  sides, collapsed doses contribute ~0 swing and cannot win the peak search, so no
+  arbitrary coherence cutoff is needed.
+- `ab_report.py`, `ab_dashboard.py` and `ab_pivot_dashboard.py` share one raw
+  coefficient axis, so they are **single-method by construction** and take a
+  `--method(s)` flag. `ab_report.py` warns if handed a mixed-method file.
+
+Result rows written before methods were a dimension carry no `method` field; every
+reader backfills a missing method to `CAA`, so old JSONL/CSV files still resume,
+de-duplicate and report correctly.
+
+---
+
 ## Generating Training Data from the Models
 
 When no external dataset is available, `sample_sentences.py` generates a training corpus by sampling directly from both models:
@@ -306,9 +361,12 @@ conda run -n acteng python -m pytest
 ├── translate_vector.py          Translate a bare .pt tensor
 ├── translate_steering_vector.py Translate a steering vector (activation_engineering layout)
 ├── ab_comparison.py             A/B eval: original vs translated SV, one behavior
-├── ab_sweep.py                  Full A/B steering sweep over all translators (resumable)
-├── ab_report.py                 Tables + HTML report from ab_sweep results
-├── compare_translated_and_original.py  Geometric/decomposition SV comparison
+├── ab_sweep.py                  Full A/B steering sweep over all translators x methods (resumable)
+├── ab_report.py                 Tables + HTML report from ab_sweep results (one method per report)
+├── method_report.py             Cross-method report (CAA/RepE/GCAV) on the dose axis
+├── ab_dashboard.py              Multi-run HTML dashboard (one method per page)
+├── ab_pivot_dashboard.py        Pivot-style HTML dashboard (one method per page)
+├── compare_translated_and_original.py  Geometric/decomposition SV comparison (method-aware)
 ├── config/
 │   ├── default.toml             MSE loss, MWE dataset
 │   ├── generated.toml           MSE loss, model-generated sentences
@@ -318,9 +376,9 @@ conda run -n acteng python -m pytest
 │   ├── generate_fineweb_configs.py     arch x loss x pooling sweep -> config/fineweb/
 │   └── generate_loss_combo_configs.py  compound-loss sweep -> config/loss_combos/
 ├── scripts/                     Convenience shell wrappers (sweeps, extraction, translation)
-├── tests/                       pytest suite (paths, split, losses, metrics, translator)
+├── tests/                       pytest suite (paths, split, losses, metrics, translator, methods)
 ├── src/acttrans/                The installable package
-│   ├── constants.py             Fixed experiment grid (model pair, layer, behaviors)
+│   ├── constants.py             Fixed experiment grid (model pair, layer, behaviors, METHODS)
 │   ├── data/
 │   │   ├── dataset.py           Activation extraction (batch resume) + per-dataset sentence loaders
 │   │   └── split.py             Seeded train/val split + activation preprocessing (shared)
@@ -333,7 +391,8 @@ conda run -n acteng python -m pytest
 │   ├── evaluation/
 │   │   ├── evaluator.py         Checkpoint evaluation entry point
 │   │   ├── metrics.py           Top-k retrieval accuracy
-│   │   └── ab_eval.py           Steering hook + closed-ended A/B evaluation
+│   │   ├── ab_eval.py           Steering hook + closed-ended A/B evaluation
+│   │   └── method_compare.py    Dose-axis metrics for cross-method comparison
 │   ├── comparison/              Translated-vs-native SV analyses (geometric, decomposition)
 │   └── utils/
 │       ├── paths.py             Path/slug conventions (per-model / per-experiment / SV trees)
