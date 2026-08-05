@@ -1,6 +1,13 @@
 """
-Compare CAA steering vectors extracted natively on Llama-3.2-3B against vectors
+Compare steering vectors extracted natively on Llama-3.2-3B against vectors
 translated from Llama-3.2-1B through the FineWeb translators.
+
+Covers every single-direction discovery method in acttrans.constants.METHODS
+(CAA, RepE, GCAV) — all three are one flat residual-stream vector per
+(model, behavior, layer), so they share this tooling. Output tables carry a
+`method` column; cosines are scale-free, so the numbers are directly comparable
+across methods despite CAA carrying its own magnitude and RepE/GCAV being unit
+vectors.
 
 Two approaches, implemented in comparison/:
 
@@ -21,10 +28,10 @@ Usage:
     conda run -n acteng python compare_translated_and_original.py decomposition
     conda run -n acteng python compare_translated_and_original.py all
 
-    # restrict translators / behaviors, pick a device:
+    # restrict translators / behaviors / methods, pick a device:
     conda run -n acteng python compare_translated_and_original.py geometric \
         --translators 'outputs/fineweb/best_translator__*mlp__cosine.pt' \
-        --behaviors refusal sycophancy --device cuda:0
+        --behaviors refusal sycophancy --methods RepE GCAV --device cuda:0
 
 Results land in outputs/comparison/{geometric,decomposition}/ as CSVs
 (long-format tables ready for pandas/plotting), with a per-run console summary.
@@ -37,6 +44,8 @@ from acttrans.comparison.common import (
     BEHAVIORS,
     DEFAULT_OUT_DIR,
     DEFAULT_TRANSLATOR_GLOB,
+    METHOD,
+    METHODS,
     discover_translators,
 )
 
@@ -66,6 +75,17 @@ def main():
         help=f"Subset of behaviors (default: all 7). Choices: {', '.join(BEHAVIORS)}",
     )
     parser.add_argument(
+        "--methods",
+        nargs="+",
+        default=[METHOD],
+        choices=list(METHODS),
+        metavar="METHOD",
+        help=f"Discovery methods to compare (default: {METHOD} only, so existing "
+             f"callers keep their previous behavior). Choices: {', '.join(METHODS)}. "
+             "Pass several to get one comparable table across methods; every output "
+             "table carries a `method` column either way.",
+    )
+    parser.add_argument(
         "--device",
         default="cuda" if _cuda_available() else "cpu",
         help="Device for translator forward passes (default: cuda if available).",
@@ -86,7 +106,8 @@ def main():
     if not translators:
         parser.error(f"No translator checkpoints matched: {args.translators}")
     print(f"{len(translators)} translator(s), "
-          f"{len(args.behaviors or BEHAVIORS)} behavior(s), device={args.device}")
+          f"{len(args.behaviors or BEHAVIORS)} behavior(s), "
+          f"methods={args.methods}, device={args.device}")
 
     out_dir = Path(args.out)
 
@@ -98,6 +119,7 @@ def main():
             device=args.device,
             out_dir=out_dir,
             layer_sweep=not args.no_layer_sweep,
+            methods=args.methods,
         )
 
     if args.approach in ("decomposition", "all"):
@@ -107,6 +129,7 @@ def main():
             behaviors=args.behaviors,
             device=args.device,
             out_dir=out_dir,
+            methods=args.methods,
         )
 
 

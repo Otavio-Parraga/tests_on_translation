@@ -1,8 +1,12 @@
 """
-Shared plumbing for comparing translated vs native CAA steering vectors.
+Shared plumbing for comparing translated vs native steering vectors.
+
+Works for any single-direction method in the activation_engineering tree (CAA,
+RepE, GCAV — see ``acttrans.constants.METHODS``); the method is a parameter of
+the loaders and defaults to CAA.
 
 Provides:
-  - loading of native CAA steering vectors from the activation_engineering tree
+  - loading of native steering vectors from the activation_engineering tree
   - the mean-activation direction of the target model (for centered cosines /
     mean-collapse diagnostics), computed once from the FineWeb activation cache
     and memoized on disk
@@ -24,7 +28,14 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 
-from ..constants import BEHAVIORS, METHOD, MODULE, SOURCE_MODEL, TARGET_MODEL  # noqa: F401
+from ..constants import (  # noqa: F401
+    BEHAVIORS,
+    METHOD,
+    METHODS,
+    MODULE,
+    SOURCE_MODEL,
+    TARGET_MODEL,
+)
 from ..models.transport import TranslatorRunner  # noqa: F401
 from ..utils.checkpoints import TranslatorInfo, discover_translators, parse_translator  # noqa: F401
 from ..utils import paths as _paths
@@ -37,22 +48,28 @@ DEFAULT_OUT_DIR = Path("outputs/comparison")
 
 # ── Steering vector loading ──────────────────────────────────────────────────
 
-def sv_path(model_name: str, behavior: str, layer: int) -> Path:
-    return _paths.sv_path(ACTENG_ROOT, model_name, METHOD, behavior, MODULE, layer)
+def sv_path(model_name: str, behavior: str, layer: int, method: str = METHOD) -> Path:
+    return _paths.sv_path(ACTENG_ROOT, model_name, method, behavior, MODULE, layer)
 
 
-def load_sv(model_name: str, behavior: str, layer: int) -> torch.Tensor:
-    """Load a CAA steering vector as a float32 [D] tensor."""
-    path = sv_path(model_name, behavior, layer)
+def load_sv(model_name: str, behavior: str, layer: int,
+            method: str = METHOD) -> torch.Tensor:
+    """Load a steering vector as a float32 [D] tensor.
+
+    Squeezing dim 0 normalizes the two shapes the methods save: CAA and RepE
+    write [1, D], GCAV writes a bare [D]."""
+    path = sv_path(model_name, behavior, layer, method)
     if not path.exists():
         raise FileNotFoundError(f"Steering vector not found: {path}")
     vec = torch.load(path, map_location="cpu", weights_only=True).float()
     return vec.squeeze(0) if vec.dim() == 2 else vec
 
 
-def available_native_layers(model_name: str, behavior: str) -> List[int]:
-    """Layers at which a native CAA SV exists for this model/behavior."""
-    root = ACTENG_ROOT / "steering_vectors" / model_name.replace("/", "_") / METHOD / behavior / MODULE
+def available_native_layers(model_name: str, behavior: str,
+                            method: str = METHOD) -> List[int]:
+    """Layers at which a native SV exists for this model/behavior/method."""
+    root = (ACTENG_ROOT / "steering_vectors" / model_name.replace("/", "_")
+            / method / behavior / MODULE)
     layers = []
     for d in root.glob("layer_*"):
         if (d / "sv.pt").exists():
