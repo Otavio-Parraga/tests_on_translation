@@ -15,6 +15,7 @@ def test_parse_last_token_single_loss():
     assert info.pooling == "last"
     assert info.src_layer == 8 and info.tgt_layer == 8
     assert info.name == p.stem
+    assert info.anchor == ""   # from-scratch names carry no anchor
 
 
 def test_parse_mean_pooled_compound_loss():
@@ -25,6 +26,20 @@ def test_parse_mean_pooled_compound_loss():
     assert info.loss == "mse+cosine+info_nce"
     assert info.pooling == "mean"
     assert info.src_layer == 8 and info.tgt_layer == 8
+
+
+def test_parse_anchored_keeps_bare_ttype():
+    # `+procrustes` is split into its own field: ttype stays the architecture name
+    # so an anchored run groups with (and is the control for) the from-scratch one.
+    p = Path("outputs/anchored/best_translator__"
+             "Llama-3.2-1B-Instruct_l8__Llama-3.2-3B-Instruct_l12__mlp+procrustes__"
+             "cosine+info_nce.pt")
+    info = parse_translator(p)
+    assert info.ttype == "mlp"
+    assert info.anchor == "procrustes"
+    assert info.loss == "cosine+info_nce"
+    assert info.pooling == "last"
+    assert info.src_layer == 8 and info.tgt_layer == 12
 
 
 def test_parse_rejects_bad_name():

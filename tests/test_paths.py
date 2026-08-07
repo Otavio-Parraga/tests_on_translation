@@ -56,3 +56,22 @@ def test_loss_tag_and_experiment_slug():
     assert best_translator_path("outputs/fineweb", cfg) == Path(
         "outputs/fineweb/best_translator__Llama-1B_l8__Llama-3B_l8__mlp__mse+cosine.pt"
     )
+
+
+def test_experiment_slug_anchored():
+    cfg = {
+        "source_model": {"name": "a/Llama-1B", "layer": 8},
+        "target_model": {"name": "a/Llama-3B", "layer": 12},
+        "translator": {"type": "mlp", "anchor": "procrustes"},
+        "training": {"losses": ["cosine", "info_nce"]},
+    }
+    # the anchored run and its from-scratch control must not share a filename
+    assert experiment_slug(cfg) == (
+        "Llama-1B_l8__Llama-3B_l12__mlp+procrustes__cosine+info_nce"
+    )
+    # an unset / "none" / "" anchor is the from-scratch slug, unchanged
+    for anchor in (None, "none", ""):
+        tcfg = {"type": "mlp"} if anchor is None else {"type": "mlp", "anchor": anchor}
+        assert experiment_slug({**cfg, "translator": tcfg}) == (
+            "Llama-1B_l8__Llama-3B_l12__mlp__cosine+info_nce"
+        )
