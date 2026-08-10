@@ -28,14 +28,23 @@ Usage:
 """
 
 import argparse
-import csv
 import html
 import json
-import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from ab_report import _curve, _mean, _nan_key, _pearson, _response_metrics
+from acttrans.evaluation.response_metrics import (
+    curve as _curve,
+    mean as _mean,
+    nan_key as _nan_key,
+    pearson as _pearson,
+    response_metrics as _response_metrics,
+)
+from acttrans.evaluation.results_io import (
+    load_rows_csv as load_rows,
+    parse_native_model,
+    parse_translator_models,
+)
 
 _HERE = Path(__file__).resolve().parent
 
@@ -53,58 +62,6 @@ DATASETS = [
      "sub": "Best config re-checked at Llama-3.2-1B l8 → Llama-3.2-3B l12",
      "dir": _HERE / "outputs" / "ab_eval" / "l8_to_l12", "coherent_max": 5.0},
 ]
-
-
-def load_rows(results_csv, methods=("CAA",)):
-    """Rows of one run's results.csv, restricted to `methods`.
-
-    This dashboard indexes blocks by (scope, translator, norm, behavior) with no
-    method component, and its coefficient axis is shared across every curve it
-    draws — which is only valid within one discovery method, since CAA carries its
-    own magnitude while RepE/GCAV are unit-norm. It therefore loads ONE method,
-    defaulting to CAA (every run in DATASETS is a CAA run). A results.csv written
-    before methods existed has no `method` column, so a missing value reads as
-    CAA. Pass methods=None to disable the filter. Cross-method comparison lives in
-    method_report.py."""
-    with open(results_csv, newline="") as f:
-        rows = list(csv.DictReader(f))
-    if methods is not None:
-        rows = [r for r in rows if (r.get("method") or "CAA") in methods]
-    for r in rows:
-        r["method"] = r.get("method") or "CAA"
-        r["coefficient"] = float(r["coefficient"])
-        r["avg_p_match"] = float(r["avg_p_match"])
-        r["accuracy"] = float(r["accuracy"])
-        sv = r.get("sv_norm")
-        r["sv_norm"] = float(sv) if sv not in (None, "") else float("nan")
-        r["source_layer"] = int(float(r["source_layer"])) if r.get("source_layer") else 8
-        r["target_layer"] = int(float(r["target_layer"])) if r.get("target_layer") else 8
-    return rows
-
-
-_MODEL_L_RE = re.compile(r"_l\d+(?:_mean)?$")
-
-
-def parse_translator_models(tr):
-    """'best_translator__Llama-3.2-1B-Instruct_l8__gemma-3-1B-it_l14__linear__procrustes'
-    -> ('Llama-3.2-1B-Instruct', 'gemma-3-1B-it'). Also strips a trailing
-    '_mean' pooling suffix (e.g. '..._l8_mean' -> model name only). Returns
-    (None, None) if the translator string doesn't follow this convention
-    (e.g. it's a native row)."""
-    parts = tr.split("__")
-    if len(parts) >= 3 and parts[0] == "best_translator":
-        return _MODEL_L_RE.sub("", parts[1]), _MODEL_L_RE.sub("", parts[2])
-    return None, None
-
-
-def parse_native_model(tr, fallback):
-    """'native_Qwen2.5-0.5B-Instruct_l10' -> 'Qwen2.5-0.5B-Instruct'.
-    'native_l10' (same-architecture run, no model in the name) -> fallback."""
-    rest = tr[len("native_"):] if tr.startswith("native_") else tr
-    m = re.match(r"^(.*)_l\d+$", rest)
-    if m and m.group(1):
-        return m.group(1)
-    return fallback
 
 
 def build_dataset(rows, coherent_max):

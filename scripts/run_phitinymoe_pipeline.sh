@@ -9,7 +9,7 @@
 # resumable/idempotent, so re-running this after a kill/crash just picks up
 # where it left off.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 declare -a STATUS
 
@@ -28,8 +28,8 @@ step() {
   fi
 }
 
-step "STEP 1/2  Fit Procrustes translators (raw + whitened)" ./run_fit_phitinymoe.sh
-step "STEP 2/2  A/B steering eval on Phi-tiny-MoE-instruct"   ./run_ab_phitinymoe.sh
+step "STEP 1/2  Fit Procrustes translators (raw + whitened)" scripts/run_fit_phitinymoe.sh
+step "STEP 2/2  A/B steering eval on Phi-tiny-MoE-instruct"   scripts/run_ab_phitinymoe.sh
 
 echo
 echo "############################################################"

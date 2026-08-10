@@ -22,47 +22,26 @@ Usage:
 
 import argparse
 import csv
-import glob
 import html
 import json
 from collections import defaultdict
 from pathlib import Path
 
+# Shared, package-level implementations (single source of truth for every A/B
+# consumer). Aliased to the historical local names so the rest of this module —
+# and its own public API — reads exactly as before.
+from acttrans.evaluation.response_metrics import (
+    curve as _curve,
+    mean as _mean,
+    nan_key as _nan_key,
+    pearson as _pearson,
+    response_metrics as _response_metrics,
+    spearman as _spearman,
+)
+from acttrans.evaluation.results_io import load_rows_jsonl as load_rows
+
 _HERE = Path(__file__).resolve().parent
 DEFAULT_OUT = _HERE / "outputs" / "ab_eval"
-
-
-def load_rows(patterns, methods=None):
-    """Load result rows, de-duplicated across shards / re-runs.
-
-    Rows predating the method dimension carry no `method` field and are all CAA,
-    so a missing method is normalized to "CAA" — that keeps the de-dup key stable
-    for old files and lets `methods` filter them.
-
-    This report is single-method by construction: its heatmaps and effect sizes
-    are indexed by (scope, translator, norm, behavior), and mixing methods into
-    one page would silently overlay curves whose coefficients mean different
-    physical doses. Pass `methods` to select one; cross-method comparison lives
-    in method_report.py."""
-    rows = []
-    seen = set()
-    for pat in patterns:
-        for fp in glob.glob(pat):
-            for line in Path(fp).read_text().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                r = json.loads(line)
-                r["method"] = r.get("method") or "CAA"
-                if methods and r["method"] not in methods:
-                    continue
-                k = (r["method"], r.get("scope"), r.get("translator"),
-                     r.get("norm_mode"), r.get("behavior"), r.get("coefficient"))
-                if k in seen:
-                    continue
-                seen.add(k)
-                rows.append(r)
-    return rows
 
 
 def write_results_csv(rows, path):
@@ -76,94 +55,6 @@ def write_results_csv(rows, path):
                                              r.get("norm_mode", ""),
                                              r["behavior"], r["coefficient"])):
             w.writerow(r)
-
-
-def _pearson(xs, ys):
-    n = len(xs)
-    if n < 2:
-        return float("nan")
-    mx = sum(xs) / n
-    my = sum(ys) / n
-    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-    vx = sum((x - mx) ** 2 for x in xs)
-    vy = sum((y - my) ** 2 for y in ys)
-    if vx == 0 or vy == 0:
-        return float("nan")
-    return cov / (vx ** 0.5 * vy ** 0.5)
-
-
-def _spearman(xs, ys):
-    """Rank correlation — robust to the uneven coefficient spacing; measures the
-    monotonic trend (does P rise as the coefficient rises?) rather than linear fit."""
-    n = len(xs)
-    if n < 2:
-        return float("nan")
-
-    def ranks(v):
-        order = sorted(range(n), key=lambda i: v[i])
-        rk = [0.0] * n
-        i = 0
-        while i < n:  # average ranks for ties
-            j = i
-            while j + 1 < n and v[order[j + 1]] == v[order[i]]:
-                j += 1
-            avg = (i + j) / 2.0
-            for k in range(i, j + 1):
-                rk[order[k]] = avg
-            i = j + 1
-        return rk
-
-    return _pearson(ranks(xs), ranks(ys))
-
-
-def _curve(rows_for_block):
-    """coeff -> (avg_p_match, accuracy) for one eval block."""
-    return {r["coefficient"]: (r["avg_p_match"], r["accuracy"])
-            for r in rows_for_block}
-
-
-def _nan_key(x, miss=-9.0):
-    """Sort helper: push NaN to the bottom for descending sorts."""
-    return x if x == x else miss
-
-
-def _response_metrics(cur, coherent_max):
-    """Given coeff -> (p_match, acc), measure how P(behavior) responds to the
-    coefficient WITHIN the coherent regime (|coeff| <= coherent_max), where the
-    model has not yet collapsed.
-
-    Returns dict with:
-      response_corr : Pearson corr(coeff, P_behavior) over the coherent window.
-                      +1 => turning the coefficient up reliably raises P(behavior)
-                      (the desired CAA direction);  ~0 => no monotonic response;
-                      <0 => coefficient up LOWERS the behavior (wrong direction).
-      dP_coherent   : P(beh)@(+max_coh) - P(beh)@(-max_coh)  (signed effect size)
-      p_pos / p_neg : P(behavior) at the largest coherent +/- coefficient
-      p_at_0        : baseline P(behavior) with no steering
-      monotonic     : fraction of adjacent coherent steps where P increases
-    """
-    coh = sorted(c for c in cur if abs(c) <= coherent_max)
-    ps = [cur[c][0] for c in coh]
-    # Spearman: monotonic "coeff up -> P(behavior) up?" robust to coeff spacing.
-    corr = _spearman([float(c) for c in coh], ps) if len(coh) >= 2 else float("nan")
-
-    pos = [c for c in coh if c > 0]
-    neg = [c for c in coh if c < 0]
-    p_pos = cur[max(pos)][0] if pos else float("nan")
-    p_neg = cur[min(neg)][0] if neg else float("nan")
-    dP = (p_pos - p_neg) if (pos and neg) else float("nan")
-
-    ups = sum(1 for a, b in zip(ps, ps[1:]) if b > a)
-    monotonic = ups / (len(ps) - 1) if len(ps) >= 2 else float("nan")
-
-    return {
-        "response_corr": corr,
-        "dP_coherent": dP,
-        "p_pos": p_pos,
-        "p_neg": p_neg,
-        "p_at_0": cur.get(0.0, (float("nan"),))[0],
-        "monotonic": monotonic,
-    }
 
 
 def build_summary(rows, coherent_max=5.0):
@@ -579,11 +470,6 @@ renderAll();
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderAll);
 new MutationObserver(renderAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 """
-
-
-def _mean(vals):
-    vs = [v for v in vals if v == v]
-    return sum(vs) / len(vs) if vs else float("nan")
 
 
 def build_html(rows, summary, source_curve, source_stats, path, coherent_max=5.0):

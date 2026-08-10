@@ -14,7 +14,7 @@
 # no GPU needed for this stage, unlike extraction/A-B-eval. Failure-tolerant +
 # skips a (layer, variant) pair whose checkpoint already exists.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 export TOKENIZERS_PARALLELISM=false
 RUN="conda run -n acteng python"

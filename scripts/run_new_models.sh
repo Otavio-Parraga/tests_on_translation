@@ -21,7 +21,7 @@
 # much as possible done on return). All steps are individually resumable/idempotent:
 # complete activation caches and already-done A/B (scope,behavior) combos are skipped.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 export CUDA_VISIBLE_DEVICES=1          # <- pin the whole pipeline to GPU 1
 export TOKENIZERS_PARALLELISM=false

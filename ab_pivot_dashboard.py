@@ -38,7 +38,12 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from ab_dashboard import DATASETS, load_rows, parse_native_model, parse_translator_models
+from ab_dashboard import DATASETS  # the dashboard-run registry lives with its CLI
+from acttrans.evaluation.results_io import (
+    load_rows_csv as load_rows,
+    parse_native_model,
+    parse_translator_models,
+)
 
 _HERE = Path(__file__).resolve().parent
 TEMPLATE = _HERE / "ab_pivot_template.html"

@@ -14,7 +14,7 @@
 #
 # Idempotent: activation caches and (with a guard) fitted checkpoints are reused.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 RUN="conda run -n acteng python"
 FWD_CFG="config/fineweb/linear_procrustes_raw.toml"      # 1B (source) -> 3B (target)

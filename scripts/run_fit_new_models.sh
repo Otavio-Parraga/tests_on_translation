@@ -12,7 +12,7 @@
 # Pinned to GPU 1. Failure-tolerant + idempotent-friendly (skips a pair whose
 # checkpoint already exists).
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 export CUDA_VISIBLE_DEVICES=1
 export TOKENIZERS_PARALLELISM=false

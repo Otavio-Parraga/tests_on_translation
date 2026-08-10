@@ -42,7 +42,7 @@ Re-run this script any time to regenerate the configs from scratch.
 
 from pathlib import Path
 
-from sweep_common import LIMIT, TRANSLATOR_BLOCKS, toml_list
+from acttrans.config_gen.common import LIMIT, TRANSLATOR_BLOCKS, toml_list
 
 from acttrans.constants import LAYER as SOURCE_LAYER, SOURCE_MODEL
 
@@ -129,8 +129,8 @@ DATA_DIR = "data/fineweb"   # shared sentences.json + activation caches (read-on
 def model_blocks(pair: dict, target_layer) -> str:
     """The [source_model]/[target_model]/[dataset] body shared by both stages.
 
-    Not reused from sweep_common.base_blocks: that one hard-codes the Llama-3B
-    target, and this study sweeps four different target models."""
+    Not reused from acttrans.config_gen.common.base_blocks: that one hard-codes
+    the Llama-3B target, and this study sweeps four different target models."""
     return f"""batch_size = {pair['batch_size']}   # activation-extraction batch size
 
 [source_model]

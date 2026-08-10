@@ -12,7 +12,7 @@
 #
 # Resumable (JSONL keyed by scope|translator|norm|behavior) and pinned to GPU 1.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # repo root (scripts/ lives one level down)
 
 export CUDA_VISIBLE_DEVICES=1
 export TOKENIZERS_PARALLELISM=false

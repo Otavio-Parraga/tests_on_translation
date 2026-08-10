@@ -1,6 +1,6 @@
 """Shared building blocks for the sweep config generators.
 
-Both generators (generate_fineweb_configs.py, generate_loss_combo_configs.py)
+Both generators (acttrans.config_gen.fineweb, acttrans.config_gen.loss_combos)
 emit configs over the SAME FineWeb split and model pair; the model/dataset TOML
 blocks and per-architecture [translator] blocks live here so the two matrices
 can never drift apart. The experiment grid itself (model names, layer, limit)

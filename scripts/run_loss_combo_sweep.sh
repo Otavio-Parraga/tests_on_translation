@@ -46,7 +46,7 @@ LAST_CFG="$CONFIG_DIR/mlp_mse+cosine_last.toml"
 
 generate_configs() {
   echo "==> Regenerating compound-loss sweep configs"
-  $PY config/generate_loss_combo_configs.py
+  $PY -m acttrans.config_gen.loss_combos
 }
 
 acts_present() {
