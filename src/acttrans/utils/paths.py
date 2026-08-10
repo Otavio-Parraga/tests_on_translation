@@ -99,10 +99,20 @@ def experiment_slug(config) -> str:
 
     Activations are keyed by model alone (shared across experiments on the same
     sentences); translators add type+loss so an MLP/MSE run, a cosine run, and an
-    SAE run on the same model pair never overwrite each other's checkpoint."""
+    SAE run on the same model pair never overwrite each other's checkpoint.
+
+    An anchored translator (``translator.anchor``, e.g. a frozen Procrustes anchor
+    with a trained residual on top) reads as ``{type}+{anchor}`` — e.g.
+    ``mlp+procrustes`` — because it is a genuinely different model from the
+    from-scratch ``mlp`` on the same pair and loss, and the two are trained as each
+    other's control. Without the suffix they would overwrite one another."""
     s = config.get("source_model", {})
     t = config.get("target_model", {})
-    tr_type = config.get("translator", {}).get("type", "mlp")
+    tcfg = config.get("translator", {})
+    tr_type = tcfg.get("type", "mlp")
+    anchor = str(tcfg.get("anchor", "") or "").lower()
+    if anchor and anchor != "none":
+        tr_type = f"{tr_type}+{anchor}"
     return f"{translator_pair_slug(s, t)}__{tr_type}__{loss_tag(config)}"
 
 

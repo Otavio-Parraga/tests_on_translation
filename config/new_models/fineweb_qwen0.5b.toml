@@ -1,0 +1,47 @@
+# Cross-ARCHITECTURE translation target: Llama-3.2-1B (source) -> Qwen2.5-0.5B (target).
+# Mirror of config/fineweb/linear_procrustes_raw.toml with the target model swapped
+# to a different family, for the "other models for translation" study.
+#
+# Qwen2.5-0.5B-Instruct: Qwen2ForCausalLM, 24 decoder layers, hidden_size 896.
+# Layer sweep (this study): target layers {8,10,12,14,16} = middle third (33%-67% depth),
+# centered on l12 (50%), mirroring the density used for Llama-3B {8..18}.
+#
+# Extract activations across the sweep (network-free, reuses data/fineweb/sentences.json):
+#   conda run -n acteng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_qwen0.5b.toml --layers 8 10 12 14 16
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW (see the forward
+# config's header). The map here changes dimension 2048 -> 896.
+
+batch_size = 32   # activation-extraction batch size
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "Qwen/Qwen2.5-0.5B-Instruct"
+layer = 12                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 30000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb"            # sentences.json + activation caches (shared)
+output_dir = "outputs/new_models"    # Procrustes checkpoint output (fit later)
+seed = 42
+train_ratio = 0.8
+normalize_activations = false        # RAW activations — see header

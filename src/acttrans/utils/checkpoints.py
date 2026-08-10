@@ -2,11 +2,17 @@
 
 Checkpoint filenames are produced by ``paths.experiment_slug``:
 
-    best_translator__{src_slug}__{tgt_slug}__{type}__{loss}.pt
+    best_translator__{src_slug}__{tgt_slug}__{type}[+{anchor}]__{loss}.pt
 
 with model slugs of the form ``{model}_l{layer}[_mean]``. This module parses
 that convention back into structured metadata — the single copy shared by
 ab_sweep.py and the comparison package (which previously each had their own).
+
+The optional ``+{anchor}`` suffix marks a translator trained on top of a frozen
+closed-form map (currently only ``+procrustes``). It is split off into its own
+field rather than folded into ``ttype`` so ``ttype`` stays the bare architecture
+name — downstream reporting groups by architecture *and* by anchor, and an
+anchored run is the from-scratch run's control, not a different architecture.
 """
 
 import glob
@@ -25,10 +31,13 @@ class TranslatorInfo:
     pooling: str       # last | mean
     src_layer: int     # layer the source SV/activations were extracted at
     tgt_layer: int     # layer the translated SV is injected at on the target
+    anchor: str = ""   # "" (from scratch) | procrustes (frozen closed-form anchor)
 
 
 _CKPT_RE = re.compile(
-    r"best_translator__(?P<src>.+?)__(?P<tgt>.+?)__(?P<type>mlp|encoder|flow|sae|linear)__(?P<loss>.+)$"
+    r"best_translator__(?P<src>.+?)__(?P<tgt>.+?)__"
+    r"(?P<type>mlp|encoder|flow|sae|linear)(?:\+(?P<anchor>procrustes))?__"
+    r"(?P<loss>.+)$"
 )
 _LAYER_RE = re.compile(r"_l(\d+)(?:_mean)?$")
 
@@ -53,6 +62,7 @@ def parse_translator(path: Path) -> TranslatorInfo:
         pooling=pooling,
         src_layer=layers[0],
         tgt_layer=layers[1],
+        anchor=m.group("anchor") or "",
     )
 
 

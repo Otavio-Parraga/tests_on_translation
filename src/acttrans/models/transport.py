@@ -57,7 +57,13 @@ class TranslatorRunner:
     def default_norm_mode(self) -> str:
         """Translator-aware default, matching ab_sweep's transport modes:
         linear/Procrustes checkpoints -> faithful floor transport, others ->
-        restore the source SV's norm."""
+        restore the source SV's norm.
+
+        Deliberately still an ``isinstance(LinearTranslator)`` check: an ANCHORED
+        checkpoint also carries ``procrustes_scale``, but that scale is the LS scale
+        of the anchor ``W`` alone, not of the composite ``W + gate*base``. Applying it
+        to the composite output would be a wrong magnitude, so anchored checkpoints
+        fall through to "restore" like every other trained translator."""
         if isinstance(self.module, LinearTranslator) and self.procrustes_scale is not None:
             return "procrustes"
         return "restore"
@@ -80,12 +86,15 @@ class TranslatorRunner:
         if self.normalize_activations:
             x = F.normalize(x, dim=-1)
 
-        if isinstance(self.module, LinearTranslator) and not apply_bias:
+        if not apply_bias and hasattr(self.module, "forward_direction"):
             # Bias-free direction transport (the bias cancels for a difference).
-            out = x @ self.module.W.weight.T
+            # Any translator with a separable affine part advertises it through this
+            # hook — LinearTranslator and AnchoredTranslator both do — so there is one
+            # code path instead of a growing isinstance chain here.
+            out = self.module.forward_direction(x)
         else:
-            # Full map. For non-linear translators apply_bias has no effect (no
-            # separable bias); for a LinearTranslator with apply_bias=True this
+            # Full map. For purely non-linear translators apply_bias has no effect (no
+            # separable bias, and no forward_direction hook); with apply_bias=True this
             # includes the affine bias (only correct for a raw activation).
             out = self.module(x)
         out = out.squeeze(0).float().cpu()

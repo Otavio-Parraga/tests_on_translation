@@ -1,0 +1,57 @@
+# Cross-ARCHITECTURE translation target: Llama-3.2-1B (source) -> Phi-tiny-MoE (target).
+# Mirror of config/new_models/fineweb_qwen0.5b.toml / fineweb_gemma1b.toml with the
+# target model swapped to a sparse MoE, for the "translating an SV into a MoE model"
+# study.
+#
+# microsoft/Phi-tiny-MoE-instruct: PhiMoEForCausalLM (phimoe), 32 decoder layers,
+# hidden_size 4096, 16 local experts / 2 active per token (3.8B total, 1.1B active).
+# Ships custom modeling code (trust_remote_code=True, handled in utils/hf.py) but
+# exposes a standard model.model.layers ModuleList, so get_layer() needs no change.
+# No flash-attn installed in this env -> transformers auto-falls-back to sdpa/eager,
+# which is required anyway since flash-attn's prebuilt kernels don't support the
+# Pascal GTX 1080 Ti (sm61) this runs on. Ships a real chat_template, so the A/B
+# eval's apply_chat_template works unmodified.
+#
+# Layer sweep (this study): target layers {10,12,14,16,18,20,22} = middle third
+# (31%-69% depth), centered on l16 (50%), mirroring the density used for gemma-3-1B
+# {8..18} and Llama-3B {8..18}.
+#
+# Extract activations across the sweep (network-free, reuses data/fineweb/sentences.json):
+#   conda run -n acteng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_phitinymoe.toml --layers 10 12 14 16 18 20 22
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW (see the forward
+# config's header). The map here changes dimension 2048 -> 4096.
+
+batch_size = 16   # activation-extraction batch size (3.8B total params -> smaller batch than the 0.5B/1B targets)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "microsoft/Phi-tiny-MoE-instruct"
+layer = 16                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 30000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb"            # sentences.json + activation caches (shared)
+output_dir = "outputs/new_models"    # Procrustes checkpoint output (fit later)
+seed = 42
+train_ratio = 0.8
+normalize_activations = false        # RAW activations — see header

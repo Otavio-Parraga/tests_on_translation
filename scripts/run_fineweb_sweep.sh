@@ -45,7 +45,7 @@ REQUIRED_ACTS=(
 
 generate_configs() {
   echo "==> Regenerating sweep configs"
-  $PY config/generate_fineweb_configs.py
+  $PY -m acttrans.config_gen.fineweb
 }
 
 extract() {

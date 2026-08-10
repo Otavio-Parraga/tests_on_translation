@@ -385,6 +385,103 @@ class LinearTranslator(nn.Module):
     def forward(self, x):
         return self.W(x)
 
+    def forward_direction(self, x):
+        """Bias-free transport of a DIFFERENCE direction: ``W x``.
+
+        A CAA steering vector is ``mean_pos - mean_neg``, and for an affine map the
+        bias cancels on a difference (``T(a) - T(b) = W(a - b)``), so transporting a
+        direction must drop ``b``. Exposed as a named hook (rather than reaching into
+        ``.W.weight`` from the caller) so every translator that *has* a separable
+        affine part advertises it the same way — see ``models.transport``.
+        """
+        return F.linear(x, self.W.weight)
+
+
+class AnchoredTranslator(nn.Module):
+    """A gradient-trained translator wrapped around a FROZEN closed-form anchor:
+
+        y = (W x + b) + gate * base(x)
+
+    WHY this exists. Closed-form orthogonal Procrustes is by a wide margin the best
+    translator measured in this repo (mean cosine to the native 3B CAA vector ~0.26
+    at 1B l8 -> 3B l8, ~0.37 at 1B l8 -> 3B l12), and every gradient-trained
+    translator loses to it — the best trained runs reach ~0.19, and every mse-only
+    or mean-pooled run sits at ~0.00, i.e. it transports no direction at all. The
+    reading is that a network trained from scratch fails to even *rediscover* the
+    linear map, let alone improve on it, so it never gets to spend capacity on the
+    nonlinear remainder.
+
+    This class removes that failure mode by construction. ``W``/``b`` are the fitted
+    Procrustes solution held as BUFFERS (no gradient ever, but still saved in and
+    restored from ``state_dict``, so ``save_translator``/``load_translator`` round-trip
+    unchanged), and ``gate`` is a single trained scalar initialized to 0. At step 0 the
+    model is therefore EXACTLY the Procrustes floor, and training can only add what the
+    orthogonal map misses — the floor is a starting point instead of a target.
+
+    Only ``base`` and ``gate`` receive gradient. A single scalar gate (rather than a
+    per-dimension one) is deliberate: it makes "how much nonlinearity did training
+    actually buy?" a single readable number, and keeps the residual branch from
+    silently re-weighting the anchor's output coordinates.
+    """
+
+    def __init__(self, base, input_dim, output_dim, bias=True, gate_init=0.0):
+        super().__init__()
+        self.base = base
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        # Buffers, not Parameters: the anchor is frozen by *construction* rather
+        # than by remembering to set requires_grad=False (or to exclude it from the
+        # optimizer) at every call site, while still living in the state_dict.
+        self.register_buffer("anchor_W", torch.zeros(output_dim, input_dim))
+        self.register_buffer(
+            "anchor_b", torch.zeros(output_dim) if bias else None
+        )
+        self.gate = nn.Parameter(torch.tensor(float(gate_init)))
+
+    def set_anchor(self, W, b=None):
+        """Load a fitted anchor: ``W`` [out, in] and optional bias ``b`` [out]."""
+        with torch.no_grad():
+            self.anchor_W.copy_(W.to(self.anchor_W.dtype))
+            if b is not None and self.anchor_b is not None:
+                self.anchor_b.copy_(b.to(self.anchor_b.dtype))
+        return self
+
+    def anchor(self, x):
+        """The frozen affine anchor alone: ``W x + b``."""
+        return F.linear(x, self.anchor_W, self.anchor_b)
+
+    def forward(self, x):
+        return self.anchor(x) + self.gate * self.base(x)
+
+    def forward_direction(self, x):
+        """Transport of a difference direction: ``W x + gate * base(x)``.
+
+        The anchor's affine bias is DROPPED here for the same reason as in
+        ``LinearTranslator.forward_direction``: a CAA steering vector is a difference,
+        and the bias cancels on a difference.
+
+        HONEST CAVEAT: ``gate * base(sv)`` is *not* the transport of a difference
+        direction the way ``W sv`` is — a nonlinear ``base`` has no separable bias to
+        drop, and feeding a difference vector into it is not the same as differencing
+        its outputs. But that is exactly the convention every non-linear translator in
+        this repo already uses (the steering vector is pushed through the map
+        directly), so the anchored variant merely inherits it rather than introducing
+        a new approximation. The anchor half of the sum is exact; the learned half is
+        as principled as the from-scratch baseline it is being compared against.
+        """
+        return F.linear(x, self.anchor_W) + self.gate * self.base(x)
+
+    def sparsity_loss(self):
+        """Forward the base's auxiliary sparsity penalty (SAE bases), else zero.
+
+        The trainer adds ``model.sparsity_loss()`` whenever the attribute exists, so
+        the wrapper has to be transparent: an SAE base must keep its L1 term, and
+        every other base must contribute a real zero tensor (not ``None``, not a
+        python float) so the graph stays intact on any device/dtype."""
+        if hasattr(self.base, "sparsity_loss"):
+            return self.base.sparsity_loss()
+        return self.anchor_W.new_zeros(())
+
 
 def fit_orthogonal_procrustes(X, Y, center=True, bias=True, whiten=False):
     """Closed-form orthogonal Procrustes fit of an affine map ``Y ≈ X @ W.T + b``.
@@ -504,6 +601,32 @@ def procrustes_scale(X, Y, W, center=True):
     return float(num / den)
 
 
+def fit_procrustes_anchor(model, X, Y, center=True, whiten=False):
+    """Fit ``model``'s frozen Procrustes anchor in place from paired activations.
+
+    Thin wrapper over ``fit_orthogonal_procrustes`` + ``procrustes_scale`` that loads
+    the closed-form solution into an ``AnchoredTranslator`` via ``set_anchor``. It
+    exists so the anchor is fitted through ONE code path (train.py) with the same
+    conventions as the standalone ``fit_procrustes.py`` baseline — otherwise the
+    "anchored run starts at the floor" claim would rest on two independent fits that
+    could quietly diverge.
+
+    Whether a bias is fitted follows the model: an anchor built with ``bias=False``
+    has no ``anchor_b`` buffer to fill.
+
+    Returns:
+        s: the optimal least-squares scale of ``W`` alone (see ``procrustes_scale``).
+           Callers store it as ``config.translator.procrustes_scale`` so it round-trips
+           into the checkpoint, mirroring fit_procrustes.py.
+    """
+    W, b = fit_orthogonal_procrustes(
+        X, Y, center=center, bias=model.anchor_b is not None, whiten=whiten
+    )
+    s = procrustes_scale(X, Y, W, center=center)
+    model.set_anchor(W, b)
+    return s
+
+
 def build_translator(config, input_dim=None, output_dim=None):
     if input_dim is None:
         input_dim = config["source_model"]["hidden_dim"]
@@ -512,7 +635,7 @@ def build_translator(config, input_dim=None, output_dim=None):
     tcfg = config["translator"]
     translator_type = tcfg["type"]
     if translator_type == "mlp":
-        return MLPTranslator(
+        model = MLPTranslator(
             input_dim=input_dim,
             output_dim=output_dim,
             hidden_dims=tcfg.get("hidden_dims", [2048, 2048]),
@@ -521,7 +644,7 @@ def build_translator(config, input_dim=None, output_dim=None):
             use_residual=tcfg.get("use_residual", False),
         )
     elif translator_type == "encoder":
-        return EncoderTranslator(
+        model = EncoderTranslator(
             input_dim=input_dim,
             output_dim=output_dim,
             d_model=tcfg.get("d_model", 512),
@@ -530,7 +653,7 @@ def build_translator(config, input_dim=None, output_dim=None):
             dropout=tcfg.get("dropout", 0.1),
         )
     elif translator_type == "sae":
-        return SparseAutoencoderTranslator(
+        model = SparseAutoencoderTranslator(
             input_dim=input_dim,
             output_dim=output_dim,
             latent_dim=tcfg.get("latent_dim", 4096),
@@ -540,13 +663,13 @@ def build_translator(config, input_dim=None, output_dim=None):
             normalize_decoder=tcfg.get("normalize_decoder", True),
         )
     elif translator_type == "linear":
-        return LinearTranslator(
+        model = LinearTranslator(
             input_dim=input_dim,
             output_dim=output_dim,
             bias=tcfg.get("bias", True),
         )
     elif translator_type == "flow":
-        return FlowTranslator(
+        model = FlowTranslator(
             input_dim=input_dim,
             output_dim=output_dim,
             num_blocks=tcfg.get("num_blocks", 8),
@@ -556,6 +679,35 @@ def build_translator(config, input_dim=None, output_dim=None):
         )
     else:
         raise ValueError(f"Unknown translator type: {translator_type}")
+
+    # Optional frozen closed-form anchor around the model just built. Unset (or
+    # "none") returns the bare from-scratch translator, so every existing config and
+    # checkpoint keeps its exact previous behavior.
+    anchor = str(tcfg.get("anchor", "") or "").lower()
+    if anchor in ("", "none"):
+        return model
+    if anchor != "procrustes":
+        raise ValueError(
+            f"Unknown translator anchor: {anchor!r}. Expected 'procrustes' or "
+            f"'none' (or leave it unset)."
+        )
+    if translator_type == "linear":
+        # y = (W x + b) + gate * (W' x + b') is just another affine map, so anchoring
+        # a linear translator adds no expressiveness — it only makes the checkpoint
+        # harder to interpret. Fail loudly instead of silently accepting a no-op.
+        raise ValueError(
+            "translator.anchor = 'procrustes' is redundant for translator.type = "
+            "'linear': the anchor IS a linear map, so the sum stays affine. Use "
+            "fit_procrustes.py for the closed-form baseline, or anchor a nonlinear "
+            "translator (mlp/encoder/sae/flow)."
+        )
+    return AnchoredTranslator(
+        model,
+        input_dim=input_dim,
+        output_dim=output_dim,
+        bias=tcfg.get("bias", True),
+        gate_init=tcfg.get("gate_init", 0.0),
+    )
 
 
 def save_translator(model, path, config, input_dim, output_dim):

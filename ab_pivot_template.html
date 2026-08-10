@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Translation A/B Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  .viz-root {
+    /* ---- light (default) ---- */
+    --page:          #f9f9f7;
+    --surface-1:     #fcfcfb;
+    --text-primary:  #0b0b0b;
+    --text-secondary:#52514e;
+    --muted:         #898781;
+    --grid:          #e1e0d9;
+    --axis:          #c3c2b7;
+    --border:        rgba(11,11,11,0.10);
+    --field:         #ffffff;
+    --accent:        #2a78d6;
+    --series-1:#2a78d6; --series-2:#1baf7a; --series-3:#eda100; --series-4:#008300;
+    --series-5:#4a3aa7; --series-6:#e34948; --series-7:#e87ba4; --series-8:#eb6834;
+    --c-src: #0b0b0b; --c-native: #7a7869;
+    /* sequential blue ramp (light: early=light -> late=dark) */
+    --seq: #cde2fb,#9ec5f4,#6da7ec,#3987e5,#2a78d6,#1c5cab,#104281;
+
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--text-primary);
+    background: var(--page);
+    min-height: 100vh;
+    padding: 20px clamp(12px, 3vw, 32px) 48px;
+  }
+  .viz-root[data-theme="dark"], .dark-vars {
+    --page:#0d0d0d; --surface-1:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+    --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
+    --field:#232322; --accent:#3987e5;
+    --series-1:#3987e5; --series-2:#199e70; --series-3:#c98500; --series-4:#008300;
+    --series-5:#9085e9; --series-6:#e66767; --series-7:#d55181; --series-8:#d95926;
+    --c-src: #ffffff; --c-native: #a19f8d;
+    --seq:#184f95,#1c5cab,#256abf,#3987e5,#5598e7,#86b6ef,#b7d3f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root:not([data-theme="light"]) {
+      --page:#0d0d0d; --surface-1:#1a1a19; --text-primary:#ffffff; --text-secondary:#c3c2b7;
+      --muted:#898781; --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,0.10);
+      --field:#232322; --accent:#3987e5;
+      --series-1:#3987e5; --series-2:#199e70; --series-3:#c98500; --series-4:#008300;
+      --series-5:#9085e9; --series-6:#e66767; --series-7:#d55181; --series-8:#d95926;
+      --c-src: #ffffff; --c-native: #a19f8d;
+      --seq:#184f95,#1c5cab,#256abf,#3987e5,#5598e7,#86b6ef,#b7d3f6;
+    }
+  }
+
+  header.hd { display:flex; align-items:baseline; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:4px; }
+  .hd h1 { font-size:20px; font-weight:650; margin:0; }
+  .hd .sub { color:var(--text-secondary); font-size:13px; }
+  .theme-btn { background:var(--field); color:var(--text-secondary); border:1px solid var(--border);
+    border-radius:8px; padding:6px 12px; font-size:13px; cursor:pointer; }
+
+  .controls { display:flex; flex-wrap:wrap; gap:14px 22px; align-items:flex-end;
+    padding:14px 16px; margin:14px 0 18px; background:var(--surface-1);
+    border:1px solid var(--border); border-radius:12px; }
+  .ctl { display:flex; flex-direction:column; gap:5px; }
+  .ctl > label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:600; }
+  select { background:var(--field); color:var(--text-primary); border:1px solid var(--border);
+    border-radius:8px; padding:7px 9px; font-size:13px; min-width:130px; font-family:inherit; }
+  .seg { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .seg button { background:var(--field); color:var(--text-secondary); border:0; padding:7px 12px;
+    font-size:13px; cursor:pointer; font-family:inherit; }
+  .seg button[aria-pressed="true"] { background:var(--accent); color:#fff; }
+  .range-inputs { display:flex; align-items:center; gap:6px; margin-top:6px; }
+  .range-inputs input[type="number"] { width:78px; background:var(--field); color:var(--text-primary);
+    border:1px solid var(--border); border-radius:8px; padding:6px 8px; font-size:13px; font-family:inherit; }
+  .range-inputs span { color:var(--muted); font-size:13px; }
+  .checks { display:flex; flex-wrap:wrap; gap:4px 12px; max-width:min(70vw,720px); max-height: 150px; overflow-y: auto; }
+  .checks label { display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:var(--text-secondary); cursor:pointer; }
+  .checks .mini { display:flex; gap:8px; margin-bottom:2px; }
+  .checks .mini button { font-size:11px; background:none; border:0; color:var(--accent); cursor:pointer; padding:0; }
+  .metric-tip { border-bottom: 1px dotted var(--muted); cursor: help; }
+
+  .card { background:var(--surface-1); border:1px solid var(--border); border-radius:12px; padding:16px 16px 8px; margin-bottom:18px; }
+  .card h2 { font-size:14px; font-weight:600; margin:0 0 2px; }
+  .card .cap { font-size:12px; color:var(--text-secondary); margin:0 0 10px; }
+  .chart-wrap { position:relative; width:100%; }
+  svg { display:block; width:100%; height:auto; overflow:visible; }
+  .legend { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:8px; padding-top:10px; border-top:1px solid var(--grid); }
+  .legend .item { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--text-secondary); }
+  .legend .key { width:16px; height:0; border-top:2px solid; border-radius:2px; }
+  .legend .key.dash { border-top-style: dashed; }
+  .legend .key.thick { border-top-width: 3px; }
+  .legend .grad { width:120px; height:10px; border-radius:3px; }
+
+  .note { font-size:12px; color:var(--muted); margin:8px 0 0; }
+  .warn { color:#b06a00; }
+  .viz-root[data-theme="dark"] .warn, .viz-root:not([data-theme="light"]) .warn { color:#fab219; }
+
+  .tip { position:absolute; pointer-events:none; z-index:5; background:var(--surface-1);
+    border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:12px;
+    box-shadow:0 4px 14px rgba(0,0,0,.14); min-width:150px; opacity:0; transition:opacity .08s; max-width: 260px; }
+  .tip .tx { color:var(--muted); font-size:11px; margin-bottom:4px; }
+  .tip .row { display:flex; align-items:center; gap:7px; justify-content:space-between; margin:2px 0; }
+  .tip .row .lhs { display:flex; align-items:center; gap:6px; color:var(--text-secondary); }
+  .tip .row .k { width:12px; height:0; border-top:2px solid; }
+  .tip .row .v { font-weight:650; color:var(--text-primary); font-variant-numeric:tabular-nums; }
+  .tip .gloss-body { color: var(--text-secondary); }
+
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th, td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--grid); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; font-variant-numeric:normal; }
+  thead th { color:var(--muted); font-weight:600; text-transform:uppercase; font-size:10.5px; letter-spacing:.03em; }
+  td .sk { display:inline-block; width:14px; height:0; border-top:2px solid; margin-right:6px; vertical-align:middle; }
+  .best td.hi { color:var(--text-primary); font-weight:650; }
+  details.tablebox { margin-top:2px; }
+  details.tablebox > summary { cursor:pointer; font-size:13px; color:var(--accent); margin-bottom:10px; }
+  .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<div class="viz-root" id="root">
+  <header class="hd">
+    <div>
+      <h1>Translated vs. native vs. origin &mdash; steering dashboard</h1>
+      <div class="sub" id="subtitle"></div>
+    </div>
+    <button class="theme-btn" id="themeBtn">Toggle theme</button>
+  </header>
+
+  <div class="controls" id="controls"></div>
+
+  <div class="card">
+    <h2 id="chartTitle">Accuracy vs. coefficient</h2>
+    <p class="cap" id="chartCap"></p>
+    <div class="chart-wrap" id="chartWrap">
+      <svg id="chart" viewBox="0 0 960 440" preserveAspectRatio="xMidYMid meet" role="img"></svg>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="legend" id="legend"></div>
+    <p class="note" id="missing"></p>
+  </div>
+
+  <div class="card">
+    <h2>Best coefficient per series</h2>
+    <p class="cap">The coefficient that maximizes the selected metric, vs. the unsteered baseline (coeff = 0).</p>
+    <div class="scroll"><table id="bestTable"></table></div>
+    <details class="tablebox">
+      <summary>Show full data table</summary>
+      <div class="scroll"><table id="dataTable"></table></div>
+    </details>
+  </div>
+</div>
+
+<script>
+const PAYLOAD = /*__DATA__*/null;
+(function () {
+  "use strict";
+  const root = document.getElementById("root");
+  if (!PAYLOAD || !PAYLOAD.records.length) {
+    root.innerHTML = "<p style='padding:24px'>No A/B results found. Run ab_sweep.py + ab_pivot_dashboard.py first.</p>";
+    return;
+  }
+  const D = PAYLOAD.dims;
+  const RECS = PAYLOAD.records;
+
+  // ---- metric glossary (hover any dotted term instead of reading prose) --
+  const GLOSSARY = {
+    response_config: {title: "config", body: "translator_type / loss / pooling / norm_mode of the learned map used to transport the SOURCE (Llama-3.2-1B) CAA vector onto the target model, at the given layer."},
+    source: {title: "SOURCE", body: "The original Llama-3.2-1B CAA vector, evaluated on Llama-3.2-1B itself. The reference every translated (and native) vector is judged against &mdash; replicated across every model/layer filter so it's always available to compare."},
+    native: {title: "NATIVE", body: "The target model's OWN CAA vector, trained from scratch on that model at that layer (not translated from anywhere). A ceiling: does this behavior direction work on this architecture at all, independent of translation quality?"},
+    coherent: {title: "Coherent window", body: "At large |coefficient| the model collapses and P(behavior)→≈50% on BOTH sides — dead tails that spuriously agree. “Coherent only” restricts the x-axis to |coeff|≤5, where steering is still legible."},
+  };
+
+  // ---- dimension metadata ------------------------------------------------
+  const MODEL_SHORT = { "Llama-3.2-3B-Instruct": "Llama-3B", "Qwen2.5-0.5B-Instruct": "Qwen-0.5B", "gemma-3-1B-it": "Gemma-1B" };
+  const modelLabel = v => MODEL_SHORT[v] || String(v);
+  const layerLabel = v => "L" + v;
+  const DIMS = {
+    model:    { label: "Target model", values: D.models,    fmt: modelLabel, get: r => r.model },
+    config:   { label: "Config",       values: D.configs,   fmt: v => v,     get: r => r.config },
+    behavior: { label: "Behavior",     values: D.behaviors,  fmt: v => v,     get: r => r.behavior },
+    layer:    { label: "Target layer", values: D.layers,     fmt: layerLabel, get: r => r.layer },
+  };
+  const DIM_KEYS = ["model", "config", "behavior", "layer"];
+  const valEq = (a, b) => String(a) === String(b);
+
+  // ---- state -------------------------------------------------------------
+  const state = {
+    metric: "accuracy",           // or "behavior_prob"
+    xMin: null, xMax: null,       // selected coefficient range (set below, once ALL_COEFFS is known)
+    compareDim: "config",
+    fixed: {},                    // per non-compare dim -> chosen value
+    compareSel: new Set(),        // chosen values of the compare dim
+  };
+  function defaultFixed(dim) {
+    const vals = DIMS[dim].values;
+    if (dim === "layer") return vals.includes(8) ? 8 : vals[0];
+    return vals[0];
+  }
+  DIM_KEYS.forEach(d => state.fixed[d] = defaultFixed(d));
+  function seedCompareSel(dim) {
+    state.compareSel = new Set();
+    const vals = DIMS[dim].values.map(String);
+    const seed = (dim === "config" ? (PAYLOAD.defaultConfigs || []) : vals).filter(v => vals.includes(String(v)));
+    (seed.length ? seed : vals).forEach(v => state.compareSel.add(String(v)));
+  }
+  seedCompareSel(state.compareDim);
+
+  const METRICS = { accuracy: "Accuracy", behavior_prob: "Avg P(matching)" };
+  // full coefficient domain across every record, for range-input bounds/presets
+  const ALL_COEFFS = [...new Set(RECS.flatMap(r => r.coeffs))].sort((a, b) => a - b);
+  const COEFF_MIN = ALL_COEFFS[0], COEFF_MAX = ALL_COEFFS[ALL_COEFFS.length - 1];
+  state.xMin = Math.max(COEFF_MIN, -PAYLOAD.coherentMax);
+  state.xMax = Math.min(COEFF_MAX, PAYLOAD.coherentMax);
+  function setRange(lo, hi) {
+    state.xMin = Math.max(COEFF_MIN, Math.min(lo, hi));
+    state.xMax = Math.min(COEFF_MAX, Math.max(lo, hi));
+  }
+  // points for a record within the current [xMin, xMax] coefficient range --
+  // filtering (not remapping) so a narrowed range genuinely drops the
+  // collapsed/dead tail instead of just rescaling the axis around it.
+  function pointsFor(rec) {
+    const ys = rec[state.metric];
+    return rec.coeffs
+      .map((c, i) => ({ x: c, y: ys[i], coeff: c }))
+      .filter(p => p.x >= state.xMin && p.x <= state.xMax);
+  }
+
+  // ---- controls ----------------------------------------------------------
+  const $controls = document.getElementById("controls");
+  function buildControls() {
+    $controls.innerHTML = "";
+
+    // Metric segmented toggle
+    const mCtl = ctl("Metric");
+    const seg = document.createElement("div"); seg.className = "seg";
+    Object.entries(METRICS).forEach(([k, lbl]) => {
+      const b = document.createElement("button");
+      b.textContent = lbl; b.setAttribute("aria-pressed", state.metric === k);
+      b.onclick = () => { state.metric = k; render(); };
+      seg.appendChild(b);
+    });
+    mCtl.appendChild(seg); $controls.appendChild(mCtl);
+
+    // Coefficient range: preset buttons + explicit min/max inputs
+    const xCtl = ctl("Coefficient range");
+    const xseg = document.createElement("div"); xseg.className = "seg";
+    const presets = [
+      ["all", "All", COEFF_MIN, COEFF_MAX],
+      ["coherent", `Coherent (|c|≤${PAYLOAD.coherentMax})`, Math.max(COEFF_MIN, -PAYLOAD.coherentMax), Math.min(COEFF_MAX, PAYLOAD.coherentMax)],
+    ];
+    presets.forEach(([key, lbl, lo, hi]) => {
+      const b = document.createElement("button");
+      b.textContent = lbl;
+      b.setAttribute("aria-pressed", state.xMin === lo && state.xMax === hi);
+      b.onclick = () => { setRange(lo, hi); buildControls(); render(); };
+      xseg.appendChild(b);
+    });
+    xCtl.appendChild(xseg);
+    const rangeInputs = document.createElement("div"); rangeInputs.className = "range-inputs";
+    const minInput = document.createElement("input");
+    minInput.type = "number"; minInput.step = "any"; minInput.value = state.xMin;
+    minInput.title = "Minimum coefficient to plot";
+    const dash = document.createElement("span"); dash.textContent = "–";
+    const maxInput = document.createElement("input");
+    maxInput.type = "number"; maxInput.step = "any"; maxInput.value = state.xMax;
+    maxInput.title = "Maximum coefficient to plot";
+    function commitRange() {
+      const lo = parseFloat(minInput.value), hi = parseFloat(maxInput.value);
+      if (Number.isNaN(lo) || Number.isNaN(hi)) return;
+      setRange(lo, hi);
+      minInput.value = state.xMin; maxInput.value = state.xMax;
+      buildControls(); render();
+    }
+    minInput.onchange = commitRange; maxInput.onchange = commitRange;
+    rangeInputs.append(minInput, dash, maxInput);
+    xCtl.appendChild(rangeInputs); $controls.appendChild(xCtl);
+
+    // Compare-by selector
+    const cCtl = ctl("Compare by (colored lines)");
+    const sel = document.createElement("select");
+    DIM_KEYS.forEach(d => sel.appendChild(opt(d, DIMS[d].label)));
+    sel.value = state.compareDim;
+    sel.onchange = () => {
+      state.compareDim = sel.value;
+      seedCompareSel(state.compareDim);
+      DIM_KEYS.forEach(d => { if (d !== state.compareDim && !(d in state.fixed)) state.fixed[d] = defaultFixed(d); });
+      buildControls(); render();
+    };
+    cCtl.appendChild(sel); $controls.appendChild(cCtl);
+
+    // Fixed single-selects for the non-compare dims
+    DIM_KEYS.filter(d => d !== state.compareDim).forEach(d => {
+      const c = ctl(DIMS[d].label);
+      const s = document.createElement("select");
+      DIMS[d].values.forEach(v => s.appendChild(opt(String(v), DIMS[d].fmt(v))));
+      if (!DIMS[d].values.map(String).includes(String(state.fixed[d]))) state.fixed[d] = defaultFixed(d);
+      s.value = String(state.fixed[d]);
+      s.onchange = () => { state.fixed[d] = s.value; render(); };
+      c.appendChild(s); $controls.appendChild(c);
+    });
+
+    // Compare-values checklist
+    const d = state.compareDim;
+    const c = ctl(DIMS[d].label + " — pick values to compare");
+    const box = document.createElement("div"); box.className = "checks";
+    const mini = document.createElement("div"); mini.className = "mini";
+    const all = document.createElement("button"); all.textContent = "all";
+    all.onclick = () => { DIMS[d].values.forEach(v => state.compareSel.add(String(v))); buildControls(); render(); };
+    const none = document.createElement("button"); none.textContent = "none";
+    none.onclick = () => { state.compareSel.clear(); buildControls(); render(); };
+    const def = document.createElement("button"); def.textContent = "default";
+    def.style.display = d === "config" ? "" : "none";
+    def.onclick = () => { seedCompareSel(d); buildControls(); render(); };
+    mini.append(all, none, def); box.appendChild(mini);
+    DIMS[d].values.forEach(v => {
+      const lab = document.createElement("label");
+      const cb = document.createElement("input"); cb.type = "checkbox";
+      cb.checked = state.compareSel.has(String(v));
+      cb.onchange = () => { cb.checked ? state.compareSel.add(String(v)) : state.compareSel.delete(String(v)); render(); };
+      const sp = document.createElement("span"); sp.textContent = DIMS[d].fmt(v);
+      if (d === "config" && (v === "SOURCE" || v === "NATIVE")) {
+        sp.className = "metric-tip"; sp.dataset.tip = v === "SOURCE" ? "source" : "native";
+      }
+      lab.append(cb, sp); box.appendChild(lab);
+    });
+    c.appendChild(box); $controls.appendChild(c);
+
+    const hint = document.createElement("p"); hint.className = "note";
+    hint.innerHTML = 'Hover <span class="metric-tip" data-tip="source">SOURCE</span>, ' +
+      '<span class="metric-tip" data-tip="native">NATIVE</span> or ' +
+      '<span class="metric-tip" data-tip="coherent">coherent-only</span> for what they mean.';
+    $controls.appendChild(hint);
+  }
+  function ctl(labelText) { const w = document.createElement("div"); w.className="ctl";
+    const l = document.createElement("label"); l.textContent = labelText; w.appendChild(l); return w; }
+  function opt(value, text) { const o=document.createElement("option"); o.value=value; o.textContent=text; return o; }
+
+  // ---- glossary tooltips (delegated; works for controls rebuilt on every render) --
+  document.addEventListener("pointerover", (e) => {
+    const t = e.target.closest(".metric-tip[data-tip]");
+    if (!t) return;
+    const g = GLOSSARY[t.dataset.tip];
+    if (!g) return;
+    tip.innerHTML = `<div class="tx">${g.title}</div><div class="gloss-body">${g.body}</div>`;
+    tip.style.opacity = 1;
+    positionTip(e);
+  });
+  document.addEventListener("pointermove", (e) => { if (e.target.closest(".metric-tip[data-tip]")) positionTip(e); });
+  document.addEventListener("pointerout", (e) => { if (e.target.closest(".metric-tip[data-tip]")) tip.style.opacity = 0; });
+  function positionTip(e) {
+    const wrap = document.getElementById("chartWrap").getBoundingClientRect();
+    let left = e.clientX - wrap.left + 14;
+    if (left + 220 > wrap.width) left = e.clientX - wrap.left - 220;
+    tip.style.left = Math.max(0, left) + "px";
+    tip.style.top = Math.max(0, e.clientY - wrap.top - 10) + "px";
+  }
+
+  // ---- color -------------------------------------------------------------
+  const cs = () => getComputedStyle(root);
+  function catColor(i) { return cs().getPropertyValue(`--series-${(i % 8) + 1}`).trim(); }
+  function seqRamp() { return cs().getPropertyValue("--seq").split(",").map(s => s.trim()).filter(Boolean); }
+  function lerpHex(a, b, t) {
+    const pa = [1,3,5].map(i=>parseInt(a.slice(i,i+2),16)), pb=[1,3,5].map(i=>parseInt(b.slice(i,i+2),16));
+    const p = pa.map((v,i)=>Math.round(v+(pb[i]-pa[i])*t));
+    return "#"+p.map(v=>v.toString(16).padStart(2,"0")).join("");
+  }
+  function seqColor(frac) {
+    const r = seqRamp(); if (r.length===1) return r[0];
+    const x = Math.max(0,Math.min(1,frac))*(r.length-1); const i=Math.floor(x);
+    return i>=r.length-1 ? r[r.length-1] : lerpHex(r[i], r[i+1], x-i);
+  }
+  // color follows the entity (value's index in the full dim order), not rank
+  function colorForValue(v) {
+    const d = state.compareDim, vals = DIMS[d].values.map(String), idx = vals.indexOf(String(v));
+    if (d === "config" && String(v) === "SOURCE") return css_cSrc();
+    if (d === "config" && String(v) === "NATIVE") return css_cNative();
+    if (d === "layer") {
+      const n = vals.length>1 ? vals.indexOf(String(v))/(vals.length-1) : 0.5;
+      return seqColor(n);
+    }
+    return catColor(idx < 0 ? 0 : idx);
+  }
+  function css_cSrc() { return cs().getPropertyValue("--c-src").trim(); }
+  function css_cNative() { return cs().getPropertyValue("--c-native").trim(); }
+
+  // ---- series assembly ---------------------------------------------------
+  function buildSeries() {
+    const d = state.compareDim;
+    const chosen = DIMS[d].values.filter(v => state.compareSel.has(String(v)));
+    const series = [], missing = [];
+    chosen.forEach(v => {
+      const rec = RECS.find(r =>
+        valEq(DIMS[d].get(r), v) &&
+        DIM_KEYS.filter(k => k !== d).every(k => valEq(DIMS[k].get(r), state.fixed[k]))
+      );
+      if (!rec) { missing.push(DIMS[d].fmt(v)); return; }
+      const pts = pointsFor(rec);
+      const isSrc = rec.config === "SOURCE", isNative = rec.config === "NATIVE";
+      series.push({ value: String(v), label: DIMS[d].fmt(v), color: colorForValue(v), pts, n: rec.n, isSrc, isNative });
+    });
+    return { series, missing };
+  }
+
+  // ---- chart -------------------------------------------------------------
+  const svg = document.getElementById("chart");
+  const NS = "http://www.w3.org/2000/svg";
+  const W = 960, H = 440, M = { t: 16, r: 108, b: 44, l: 52 };
+  const tip = document.getElementById("tip");
+
+  function mk(tag, attrs, parent) { const e=document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+  function niceTicks(min, max, n) {
+    const span = (max-min)||1, step0 = span/n, mag = Math.pow(10, Math.floor(Math.log10(step0)));
+    const norm = step0/mag, step = (norm>=5?5:norm>=2?2:1)*mag;
+    const out=[]; for (let t=Math.ceil(min/step)*step; t<=max+1e-9; t+=step) out.push(+t.toFixed(6)); return out;
+  }
+
+  function render() {
+    document.getElementById("chartTitle").textContent = METRICS[state.metric] + " vs. steering coefficient";
+    const { series, missing } = buildSeries();
+    const fixedDesc = DIM_KEYS.filter(k=>k!==state.compareDim)
+      .map(k => `${DIMS[k].label}: ${DIMS[k].fmt(state.fixed[k])}`).join("  ·  ");
+    document.getElementById("chartCap").textContent =
+      `Comparing ${DIMS[state.compareDim].label.toLowerCase()} · ${fixedDesc} · coeff range [${state.xMin}, ${state.xMax}]`;
+
+    svg.innerHTML = "";
+    const plotW = W - M.l - M.r, plotH = H - M.t - M.b;
+    const g = mk("g", {}, svg);
+
+    // domains
+    let xs = []; series.forEach(s => s.pts.forEach(p => xs.push(p.x)));
+    const xmin = xs.length ? Math.min(...xs) : -1, xmax = xs.length ? Math.max(...xs) : 1;
+    const xspan = (xmax - xmin) || 1, xpad = xspan * 0.03;
+    const X = v => M.l + ((v - (xmin - xpad)) / ((xmax + xpad) - (xmin - xpad))) * plotW;
+    const Y = v => M.t + (1 - v) * plotH;   // metric domain fixed [0,1]
+
+    // gridlines + y ticks
+    [0, .25, .5, .75, 1].forEach(t => {
+      mk("line", { x1:M.l, x2:M.l+plotW, y1:Y(t), y2:Y(t), stroke:"var(--grid)", "stroke-width":1 }, g);
+      const tx = mk("text", { x:M.l-8, y:Y(t)+4, "text-anchor":"end", "font-size":11, fill:"var(--muted)" }, g);
+      tx.textContent = t.toFixed(2);
+    });
+    // x ticks
+    niceTicks(xmin, xmax, 7).forEach(t => {
+      const isZero = Math.abs(t) < 1e-9;
+      mk("line", { x1:X(t), x2:X(t), y1:M.t, y2:M.t+plotH,
+        stroke: isZero ? "var(--axis)" : "var(--grid)", "stroke-width": isZero ? 1.5 : 1 }, g);
+      const tx = mk("text", { x:X(t), y:M.t+plotH+18, "text-anchor":"middle", "font-size":11, fill:"var(--muted)" }, g);
+      tx.textContent = (+t).toString();
+    });
+    // axis titles
+    let at = mk("text", { x:M.l+plotW/2, y:H-6, "text-anchor":"middle", "font-size":11.5, fill:"var(--text-secondary)" }, g);
+    at.textContent = "steering coefficient";
+    at = mk("text", { transform:`rotate(-90 14 ${M.t+plotH/2})`, x:14, y:M.t+plotH/2, "text-anchor":"middle", "font-size":11.5, fill:"var(--text-secondary)" }, g);
+    at.textContent = METRICS[state.metric];
+    // baseline label at x=0
+    if (xmin <= 0 && xmax >= 0) {
+      const bl = mk("text", { x:X(0)+4, y:M.t+11, "font-size":10.5, fill:"var(--muted)" }, g);
+      bl.textContent = "baseline";
+    }
+
+    // lines + markers + end labels
+    const directLabel = series.length > 0 && series.length <= 4;
+    series.forEach(s => {
+      const sorted = [...s.pts].sort((a,b)=>a.x-b.x);
+      const dpath = sorted.map((p,i)=>`${i?"L":"M"}${X(p.x).toFixed(2)} ${Y(p.y).toFixed(2)}`).join(" ");
+      const dash = s.isSrc ? "6 4" : null;
+      const wdt = s.isSrc ? 2.5 : (s.isNative ? 3 : 2);
+      const attrs = { d:dpath, fill:"none", stroke:s.color, "stroke-width":wdt, "stroke-linejoin":"round", "stroke-linecap":"round" };
+      if (dash) attrs["stroke-dasharray"] = dash;
+      mk("path", attrs, g);
+      sorted.forEach(p => {
+        mk("circle", { cx:X(p.x), cy:Y(p.y), r:3.5, fill: s.isSrc ? "var(--surface-1)" : s.color, stroke:s.color, "stroke-width":s.isSrc?2:1.5 }, g);
+      });
+      if (directLabel) {
+        const last = sorted[sorted.length-1];
+        const t = mk("text", { x:X(last.x)+8, y:Y(last.y)+4, "font-size":11.5, fill:"var(--text-secondary)" }, g);
+        t.textContent = s.label;
+      }
+    });
+
+    if (!series.length) {
+      const t = mk("text", { x:M.l+plotW/2, y:M.t+plotH/2, "text-anchor":"middle", "font-size":13, fill:"var(--muted)" }, g);
+      t.textContent = "No series match the current filters.";
+    }
+
+    // crosshair + tooltip overlay
+    const cross = mk("line", { x1:0,x2:0,y1:M.t,y2:M.t+plotH, stroke:"var(--axis)", "stroke-width":1, "stroke-dasharray":"3 3", opacity:0 }, g);
+    const hit = mk("rect", { x:M.l, y:M.t, width:plotW, height:plotH, fill:"transparent" }, g);
+    const uniqX = [...new Set(xs)].sort((a,b)=>a-b);
+    function move(ev) {
+      if (!series.length || !uniqX.length) return;
+      const box = svg.getBoundingClientRect();
+      const px = (ev.clientX - box.left) / box.width * W;
+      const xv = uniqX.reduce((best,c)=> Math.abs(X(c)-px)<Math.abs(X(best)-px)?c:best, uniqX[0]);
+      cross.setAttribute("x1", X(xv)); cross.setAttribute("x2", X(xv)); cross.setAttribute("opacity", 1);
+      const rows = series.map(s => { const p = s.pts.find(q=>Math.abs(q.x-xv)<1e-9); return p?{label:s.label,color:s.color,y:p.y}:null; })
+        .filter(Boolean).sort((a,b)=>b.y-a.y);
+      tip.innerHTML = "";
+      const tx = document.createElement("div"); tx.className="tx";
+      tx.textContent = "coefficient = " + (+xv).toFixed(2);
+      tip.appendChild(tx);
+      rows.forEach(r => {
+        const row = document.createElement("div"); row.className="row";
+        const lhs = document.createElement("div"); lhs.className="lhs";
+        const k = document.createElement("span"); k.className="k"; k.style.borderColor=r.color;
+        const nm = document.createElement("span"); nm.textContent=r.label;
+        lhs.append(k, nm);
+        const v = document.createElement("span"); v.className="v"; v.textContent=r.y.toFixed(3);
+        row.append(lhs, v); tip.appendChild(row);
+      });
+      const wrap = document.getElementById("chartWrap").getBoundingClientRect();
+      let left = ev.clientX - wrap.left + 14;
+      if (left + 190 > wrap.width) left = ev.clientX - wrap.left - 190;
+      tip.style.left = left + "px";
+      tip.style.top = Math.max(4, ev.clientY - wrap.top - 10) + "px";
+      tip.style.opacity = 1;
+    }
+    hit.addEventListener("pointermove", move);
+    hit.addEventListener("pointerleave", () => { tip.style.opacity=0; cross.setAttribute("opacity",0); });
+
+    renderLegend(series);
+    renderMissing(missing);
+    renderTables(series, uniqX);
+  }
+
+  // ---- legend ------------------------------------------------------------
+  function renderLegend(series) {
+    const el = document.getElementById("legend"); el.innerHTML = "";
+    if (series.length < 2) return;
+    if (state.compareDim === "layer") {
+      const item = document.createElement("div"); item.className="item";
+      const lo = document.createElement("span"); lo.textContent = series[0].label;
+      const grad = document.createElement("span"); grad.className="grad";
+      const r = seqRamp(); grad.style.background = `linear-gradient(90deg, ${r.join(",")})`;
+      const hi = document.createElement("span"); hi.textContent = series[series.length-1].label;
+      item.append(lo, grad, hi); el.appendChild(item);
+      return;
+    }
+    series.forEach(s => {
+      const it = document.createElement("div"); it.className="item";
+      const k = document.createElement("span"); k.className="key" + (s.isSrc?" dash":"") + (s.isNative?" thick":"");
+      k.style.borderColor=s.color;
+      const nm = document.createElement("span"); nm.textContent=s.label;
+      it.append(k, nm); el.appendChild(it);
+    });
+  }
+  function renderMissing(missing) {
+    const el = document.getElementById("missing");
+    el.textContent = missing.length ? `No data for: ${missing.join(", ")} (with the current fixed settings).` : "";
+    el.className = "note" + (missing.length ? " warn" : "");
+  }
+
+  // ---- tables ------------------------------------------------------------
+  function metricAt(pts, x) { const p = pts.find(q=>Math.abs(q.x-x)<1e-9); return p?p.y:null; }
+  function renderTables(series, uniqX) {
+    // Best-per-series
+    const bt = document.getElementById("bestTable");
+    bt.innerHTML = "";
+    const head = bt.createTHead().insertRow();
+    ["Series","Best coeff","Metric @ best","Baseline (0)","Δ vs baseline","n items"].forEach(h => { const th=document.createElement("th"); th.textContent=h; head.appendChild(th); });
+    const tb = bt.createTBody();
+    const rows = series.map(s => {
+      let best = s.pts[0]; s.pts.forEach(p => { if (p.y > best.y) best = p; });
+      const base = metricAt(s.pts, 0);
+      return { s, best, base };
+    }).sort((a,b)=> b.best.y - a.best.y);
+    rows.forEach(({s,best,base}) => {
+      const tr = tb.insertRow(); tr.className="best";
+      const c0 = tr.insertCell(); const sk=document.createElement("span"); sk.className="sk"; sk.style.borderColor=s.color;
+      c0.appendChild(sk); c0.appendChild(document.createTextNode(s.label));
+      cell(tr, (best.coeff ?? best.x).toString());
+      cell(tr, best.y.toFixed(3), true);
+      cell(tr, base==null?"—":base.toFixed(3));
+      const d = (base==null)?null:(best.y-base);
+      cell(tr, d==null?"—":(d>=0?"+":"")+d.toFixed(3));
+      cell(tr, String(s.n));
+    });
+    if (!series.length) { const tr=tb.insertRow(); const td=tr.insertCell(); td.colSpan=6; td.textContent="—"; }
+
+    // Full grid
+    const dt = document.getElementById("dataTable"); dt.innerHTML="";
+    const h2 = dt.createTHead().insertRow();
+    const th0=document.createElement("th"); th0.textContent = "coefficient"; h2.appendChild(th0);
+    series.forEach(s => { const th=document.createElement("th"); const sk=document.createElement("span"); sk.className="sk"; sk.style.borderColor=s.color; th.appendChild(sk); th.appendChild(document.createTextNode(s.label)); h2.appendChild(th); });
+    const b2 = dt.createTBody();
+    uniqX.forEach(x => {
+      const tr = b2.insertRow(); cell(tr, x.toString());
+      series.forEach(s => { const y = metricAt(s.pts, x); cell(tr, y==null?"—":y.toFixed(3)); });
+    });
+  }
+  function cell(tr, text, hi) { const td=tr.insertCell(); td.textContent=text; if (hi) td.className="hi"; return td; }
+
+  // ---- theme -------------------------------------------------------------
+  document.getElementById("themeBtn").onclick = () => {
+    const cur = root.getAttribute("data-theme");
+    const isDark = cur ? cur==="dark" : matchMedia("(prefers-color-scheme:dark)").matches;
+    root.setAttribute("data-theme", isDark ? "light" : "dark");
+    render();
+  };
+  matchMedia("(prefers-color-scheme:dark)").addEventListener("change", () => { if (!root.getAttribute("data-theme")) render(); });
+
+  // ---- init --------------------------------------------------------------
+  document.getElementById("subtitle").textContent =
+    `${(D.models || []).map(modelLabel).join(" + ")}  ·  ${PAYLOAD.n_series} series  ·  ` +
+    `${D.configs.length} configs, ${D.behaviors.length} behaviors, ${D.layers.length} layers`;
+  buildControls();
+  render();
+  window.addEventListener("resize", () => { const t=document.getElementById("tip"); t.style.opacity=0; });
+})();
+</script>
+</body>
+</html>

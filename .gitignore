@@ -16,6 +16,16 @@ dist/
 /outputs/
 /steering_vectors/
 
+# Auto-generated sweep configs — regenerate from the repo root with
+#   python -m acttrans.config_gen.fineweb        # -> config/fineweb/
+#   python -m acttrans.config_gen.loss_combos    # -> config/loss_combos/
+# Ignore the generated files (not the directory itself) so the hand-maintained
+# Procrustes config can be re-included. `/config/loss_combos/*` is entirely
+# generated, so nothing is re-included there.
+/config/fineweb/*
+!/config/fineweb/linear_procrustes_raw.toml
+/config/loss_combos/*
+
 # Logs
 *.log
 log_fineweb.txt
