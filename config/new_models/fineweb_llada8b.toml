@@ -1,0 +1,67 @@
+# Cross-ARCHITECTURE translation target: Llama-3.2-1B (source) -> LLaDA-8B-Instruct (target).
+# Mirror of config/new_models/fineweb_phitinymoe.toml with the target swapped to a
+# discrete diffusion LM, for the "translating an SV into a non-autoregressive model" study.
+#
+# GSAI-ML/LLaDA-8B-Instruct: LLaDAModelLM (llada), 32 decoder blocks, hidden_size 4096,
+# bidirectional (non-causal) attention, no KV cache, mask_token_id 126336. Ships custom
+# modeling code (trust_remote_code=True, already always-on in utils/hf.py) that predates
+# several transformers-5.x internal API changes; three small, guarded compatibility shims
+# in utils/hf.py handle this (see the comment block there): (1) its __init__ never calls
+# self.post_init(), so `all_tied_weights_keys` never gets set; (2) its tie_weights()
+# override uses the pre-5.x no-kwargs signature; (3) its forward() reads
+# self.config.use_cache, which LLaDAConfig never defines. Its block list lives at
+# model.model.transformer.blocks (not model.model.layers or model.transformer.h), so
+# get_layer() gained one more elif branch for that path.
+#
+# token_position = "mean": bidirectional attention means every position already has
+# full-sequence context in one pass, so there is no privileged "last token" the way
+# there is for a causal model — "-1" would be an arbitrary, unjustified position here.
+# Mean-pooling over non-pad tokens (already-existing pooling mode, dataset.py) is the
+# principled choice, and needs a full clean (unmasked) forward pass, not the iterative
+# denoising/generation loop — extraction never calls .generate().
+#
+# Layer sweep (this study): target layers {10,12,14,16,18,20,22} = middle third
+# (31%-69% depth of 32 layers), same range as Phi-tiny-MoE (also 32 layers).
+#
+# Extract activations across the sweep (network-free, reuses data/fineweb/sentences.json):
+#   CUDA_VISIBLE_DEVICES=2 conda run -p /mnt/C-SSD/parraga/conda_envs/act_eng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_llada8b.toml --layers 10 12 14 16 18 20 22
+#
+# Peak GPU memory observed loading + one forward pass on an A6000 (48GB): ~16GB
+# (bf16 weights dominate; activation overhead is negligible at this batch size).
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW. The map here changes
+# dimension 2048 -> 4096.
+
+batch_size = 16   # activation-extraction batch size (8B dense params -> conservative, matches Phi-tiny-MoE's choice)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "GSAI-ML/LLaDA-8B-Instruct"
+layer = 16                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mean"
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 30000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb"            # sentences.json + activation caches (shared)
+output_dir = "outputs/new_models"    # Procrustes checkpoint output (fit later)
+seed = 42
+train_ratio = 0.8
+normalize_activations = false        # RAW activations — see header
