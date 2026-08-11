@@ -14,6 +14,8 @@ import json
 import re
 from pathlib import Path
 
+from ..utils.paths import POOLING_SUFFIX_RE
+
 
 def load_rows_jsonl(patterns, methods=None):
     """Load result rows from JSONL shard glob(s), de-duplicated across shards / re-runs.
@@ -75,13 +77,15 @@ def load_rows_csv(results_csv, methods=("CAA",)):
     return rows
 
 
-_MODEL_L_RE = re.compile(r"_l\d+(?:_mean)?$")
+# Built from the paths.py suffix table: a suffix left un-stripped would leak into
+# the model name and split one model into two groups in every downstream group-by.
+_MODEL_L_RE = re.compile(r"_l\d+%s$" % POOLING_SUFFIX_RE)
 
 
 def parse_translator_models(tr):
     """'best_translator__Llama-3.2-1B-Instruct_l8__gemma-3-1B-it_l14__linear__procrustes'
     -> ('Llama-3.2-1B-Instruct', 'gemma-3-1B-it'). Also strips a trailing
-    '_mean' pooling suffix (e.g. '..._l8_mean' -> model name only). Returns
+    pooling suffix ('_mean', '_mask'; e.g. '..._l8_mean' -> model name only). Returns
     (None, None) if the translator string doesn't follow this convention
     (e.g. it's a native row)."""
     parts = tr.split("__")

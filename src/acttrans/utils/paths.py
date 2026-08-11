@@ -36,18 +36,51 @@ def sentences_path(data_dir) -> Path:
     return Path(data_dir) / "sentences.json"
 
 
+# The non-default extraction modes, and the filename suffix each one earns. This
+# is the single source of truth for the convention: model_slug() writes these
+# suffixes, and checkpoints.py / results_io.py / comparison.common read them back.
+# Keeping one dict means adding a mode can never leave a reader classifying it as
+# last-token (the failure mode that silently reuses the wrong activation cache).
+#
+#   mean -> mask-weighted mean over every real token
+#   mask -> hidden state at an appended [MASK] position (masked-diffusion LMs)
+#
+# Last-token extraction (token_position = -1, the default) is deliberately absent:
+# it keeps the bare slug so every pre-existing cache stays valid.
+POOLING_SUFFIXES = {"mean": "_mean", "mask": "_mask"}
+
+# For readers that parse a slug back apart: "(?:_mean|_mask)?"
+POOLING_SUFFIX_RE = "(?:%s)?" % "|".join(POOLING_SUFFIXES.values())
+
+
+def pooling_of(model_cfg) -> str:
+    """The extraction mode of a model block: 'last' | 'mean' | 'mask'.
+
+    Any int token_position reads as 'last' for labelling purposes — only -1 is
+    used in practice, and a fixed index is still a single-position readout."""
+    tp = str(model_cfg.get("token_position", -1))
+    return tp if tp in POOLING_SUFFIXES else "last"
+
+
+def pooling_suffix(model_cfg) -> str:
+    """The filename suffix earned by this model block's extraction mode ('' for last)."""
+    return POOLING_SUFFIXES.get(str(model_cfg.get("token_position", -1)), "")
+
+
 def model_slug(model_cfg) -> str:
     """e.g. {"name": "meta-llama/Llama-3.2-3B-Instruct", "layer": 8} -> "Llama-3.2-3B-Instruct_l8".
 
-    Mean-pooled extraction gets a ``_mean`` suffix so its activation cache and
-    translator checkpoints never collide with the last-token ones on the same
-    sentence set. Last-token (the default) keeps the bare slug for backward
-    compatibility with existing caches."""
+    Non-default extraction modes get a suffix (``_mean``, ``_mask``) so their
+    activation caches and translator checkpoints never collide with the
+    last-token ones on the same sentence set. Last-token (the default) keeps the
+    bare slug for backward compatibility with existing caches.
+
+    The collision matters more than it looks: extraction skips any cache whose
+    ``n_sentences`` already matches, so two modes sharing a slug would not merely
+    overwrite each other — the second would silently *reuse the first's
+    activations* and report success."""
     short = str(model_cfg.get("name", "model")).split("/")[-1]
-    base = f"{short}_l{model_cfg.get('layer', '?')}"
-    if str(model_cfg.get("token_position", -1)) == "mean":
-        base += "_mean"
-    return base
+    return f"{short}_l{model_cfg.get('layer', '?')}{pooling_suffix(model_cfg)}"
 
 
 def activation_path(data_dir, model_cfg) -> Path:

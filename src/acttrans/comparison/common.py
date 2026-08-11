@@ -82,7 +82,7 @@ def available_native_layers(model_name: str, behavior: str,
 def mean_activation_direction(
     model_name: str = TARGET_MODEL,
     layer: int = 8,
-    pooling: str = "last",
+    pooling: str = "last",   # last | mean | mask, as reported by TranslatorInfo.pooling
     cache_dir: Path = DEFAULT_OUT_DIR / "cache",
 ):
     """Unit-norm mean activation of the FineWeb cache for (model, layer, pooling).
@@ -92,7 +92,10 @@ def mean_activation_direction(
     mode. Returns None (with a warning) if no activation cache exists.
     """
     short = model_name.split("/")[-1]
-    suffix = "_mean" if pooling == "mean" else ""
+    # Looked up in the paths.py table rather than tested per mode: an unrecognized
+    # pooling would fall back to the last-token cache and silently center against
+    # the wrong distribution.
+    suffix = _paths.POOLING_SUFFIXES.get(pooling, "")
     memo = cache_dir / f"mean_dir__{short}_l{layer}{suffix}.pt"
     if memo.exists():
         return torch.load(memo, map_location="cpu", weights_only=True)

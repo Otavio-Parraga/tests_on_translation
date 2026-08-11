@@ -28,6 +28,16 @@ def test_parse_mean_pooled_compound_loss():
     assert info.src_layer == 8 and info.tgt_layer == 8
 
 
+def test_parse_mask_pooled():
+    p = Path("best_translator__"
+             "LLaDA-8B-Instruct_l16_mask__Llama-3.2-3B-Instruct_l8_mask__mlp__mse.pt")
+    info = parse_translator(p)
+    assert info.ttype == "mlp"
+    assert info.loss == "mse"
+    assert info.pooling == "mask"
+    assert info.src_layer == 16 and info.tgt_layer == 8
+
+
 def test_parse_anchored_keeps_bare_ttype():
     # `+procrustes` is split into its own field: ttype stays the architecture name
     # so an anchored run groups with (and is the control for) the from-scratch one.

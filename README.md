@@ -134,9 +134,36 @@ All settings live in `config/default.toml`. Three pre-built configs are included
 | `name` | HuggingFace model ID |
 | `layer` | Transformer layer to hook (0-indexed) |
 | `module` | Hook point: `"residual"` (post-residual stream) or `"mlp"` |
-| `token_position` | Token to extract; `-1` means the last token |
+| `token_position` | What to read: `-1` (last real token, default), `"mean"`, `"mask"`, or a fixed int index — see below |
 
 Activations are extracted in `bfloat16` and stored as the hidden state at `token_position` of the specified layer.
+
+**Extraction modes.** `token_position` accepts:
+
+| Value | Reads | Use for |
+|---|---|---|
+| `-1` | the last *real* (non-pad) token | causal LMs — the CAA convention |
+| `"mean"` | mask-weighted mean over every real token | bidirectional models, where no position is privileged |
+| `"mask"` | the hidden state at an appended `[MASK]` token | masked-diffusion LMs (LLaDA family) |
+| int | that fixed column, verbatim | ad-hoc probing |
+
+`"mask"` exists because a masked-diffusion LM has no privileged last token, yet mean-pooling
+describes text that *already exists* — while a steering vector is injected mid-denoising, where
+the sequence is mostly `[MASK]`. The mask position is the one slot these models are trained to
+fill, and the position the A/B eval reads its logits from, so a vector fit there is fit in the
+space it is applied in. Extraction still runs a single clean forward pass; the iterative
+denoising loop is never invoked. The mask id is resolved per-model (the two LLaDA families
+expose it in different places — see `resolve_mask_token_id` in `utils/hf.py`), and requesting
+`"mask"` on a model without one raises rather than guessing.
+
+Source and target may use different modes — a causal source at `-1` paired with a diffusion
+target at `"mean"`/`"mask"` is the normal case for the diffusion study.
+
+Non-default modes earn a filename suffix (`_mean`, `_mask`; see `POOLING_SUFFIXES` in
+`utils/paths.py`) so their activation caches and translator checkpoints never collide with the
+last-token ones. This is load-bearing rather than cosmetic: extraction *skips* any cache whose
+`n_sentences` already matches, so two modes sharing a slug would not merely overwrite each
+other — the second would silently reuse the first's activations and report success.
 
 ### `[dataset]`
 

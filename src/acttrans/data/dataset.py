@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import torch
 from tqdm import tqdm
 
-from ..utils.hf import get_layer, load_model_and_tokenizer
+from ..utils.hf import append_mask_token, get_layer, load_model_and_tokenizer, resolve_mask_token_id
 from ..utils.paths import activation_path, data_dir_of, legacy_activation_path, sentences_path
 
 
@@ -102,11 +102,33 @@ def extract_activations_with_resume(
         model.eval()
 
         layer = get_layer(model, model_cfg["layer"])
-        # token_position: an int index (e.g. -1 = last token) or the string "mean"
-        # to mean-pool over every real (non-pad) token in the sentence. Both modes
-        # use the attention mask so they are correct under left- OR right-padding.
+        # token_position selects what one vector per sentence is read from:
+        #   -1       last *real* token (default; the causal-LM convention)
+        #   "mean"   mask-weighted mean over every real (non-pad) token
+        #   "mask"   the hidden state at an appended [MASK] position
+        #   int      that fixed column, verbatim
+        # Every mask-aware mode uses the attention mask, so all are correct under
+        # left- OR right-padding.
+        #
+        # Why "mask" exists: a masked-diffusion LM (LLaDA) has bidirectional
+        # attention, so no position is privileged the way a causal model's last
+        # token is — but the *mask* position is the one slot the model was trained
+        # to answer "what token belongs here", making it the structural analogue of
+        # last-token readout. It is also where the A/B eval reads its logits, so a
+        # vector fit here is fit in the space it will be applied in.
         token_position = model_cfg.get("token_position", -1)
         pooling_mean = str(token_position) == "mean"
+        pooling_mask = str(token_position) == "mask"
+        if not (pooling_mean or pooling_mask or isinstance(token_position, int)):
+            # Fail here rather than let an unrecognized string reach the tensor
+            # index below, where it would surface as an opaque IndexError from
+            # inside a forward hook after the model was already loaded.
+            raise ValueError(
+                f"Unsupported token_position {token_position!r}. Expected an int "
+                '(e.g. -1), "mean", or "mask".'
+            )
+
+        mask_token_id = resolve_mask_token_id(model, tokenizer) if pooling_mask else None
         captured = {}
 
         def hook_fn(module, input, output):
@@ -117,6 +139,11 @@ def extract_activations_with_resume(
                 summed = (hidden * m).sum(dim=1)
                 counts = m.sum(dim=1).clamp(min=1.0)
                 captured["act"] = (summed / counts).detach().cpu()
+            elif pooling_mask:
+                # The appended [MASK] column, whose index the tokenize step
+                # recorded per row (it varies with each sentence's length).
+                rows = torch.arange(hidden.shape[0], device=hidden.device)
+                captured["act"] = hidden[rows, captured["mask_pos"], :].detach().cpu()
             elif token_position == -1:
                 # Last *real* token: the largest position whose mask is 1. Robust to
                 # whichever side the tokenizer pads on (plain hidden[:, -1] would grab
@@ -142,9 +169,28 @@ def extract_activations_with_resume(
             for step, i in enumerate(tqdm(range(0, len(remaining), batch_size), **tqdm_kwargs)):
                 batch = remaining[i : i + batch_size]
                 encoded = tokenizer(
-                    batch, padding=True, truncation=True, max_length=512, return_tensors="pt"
+                    batch,
+                    padding=True,
+                    truncation=True,
+                    # Reserve a slot for the appended [MASK] so the widened
+                    # sequence still respects the 512 budget.
+                    max_length=511 if pooling_mask else 512,
+                    return_tensors="pt",
                 )
                 encoded = {k: v.to(device) for k, v in encoded.items()}
+                if pooling_mask:
+                    ids, attn, mask_pos = append_mask_token(
+                        encoded,
+                        mask_token_id,
+                        tokenizer.pad_token_id,
+                        getattr(tokenizer, "padding_side", "right"),
+                    )
+                    encoded["input_ids"], encoded["attention_mask"] = ids, attn
+                    captured["mask_pos"] = mask_pos
+                    # token_type_ids (if the tokenizer emitted any) would now be one
+                    # column short of input_ids. None of these models use them, and
+                    # dropping them is what the widened batch requires.
+                    encoded.pop("token_type_ids", None)
                 captured["attention_mask"] = encoded["attention_mask"]
                 with torch.no_grad():
                     try:

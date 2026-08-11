@@ -4,7 +4,7 @@ Checkpoint filenames are produced by ``paths.experiment_slug``:
 
     best_translator__{src_slug}__{tgt_slug}__{type}[+{anchor}]__{loss}.pt
 
-with model slugs of the form ``{model}_l{layer}[_mean]``. This module parses
+with model slugs of the form ``{model}_l{layer}[_mean|_mask]``. This module parses
 that convention back into structured metadata — the single copy shared by
 ab_sweep.py and the comparison package (which previously each had their own).
 
@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from .paths import POOLING_SUFFIX_RE, POOLING_SUFFIXES
+
 
 @dataclass
 class TranslatorInfo:
@@ -28,10 +30,17 @@ class TranslatorInfo:
     name: str          # checkpoint stem (unique id)
     ttype: str         # mlp | encoder | flow | sae | linear
     loss: str          # mse | cosine | info_nce | procrustes*
-    pooling: str       # last | mean
+    pooling: str       # last | mean | mask — the SOURCE side's extraction mode
     src_layer: int     # layer the source SV/activations were extracted at
     tgt_layer: int     # layer the translated SV is injected at on the target
     anchor: str = ""   # "" (from scratch) | procrustes (frozen closed-form anchor)
+    # The TARGET side's extraction mode, which need not match the source's. It
+    # usually does (config_gen sets both from one value), but a diffusion target
+    # is read at "mean"/"mask" while its causal source stays last-token — and for
+    # those runs `pooling` alone reads "last" for every arm, making the arms
+    # indistinguishable in any report that groups by it. Defaulted so existing
+    # callers that only care about the source side are unaffected.
+    tgt_pooling: str = "last"
 
 
 _CKPT_RE = re.compile(
@@ -39,7 +48,9 @@ _CKPT_RE = re.compile(
     r"(?P<type>mlp|encoder|flow|sae|linear)(?:\+(?P<anchor>procrustes))?__"
     r"(?P<loss>.+)$"
 )
-_LAYER_RE = re.compile(r"_l(\d+)(?:_mean)?$")
+# Built from the paths.py suffix table so a newly registered extraction mode
+# parses here too, instead of failing to match and killing a whole glob.
+_LAYER_RE = re.compile(r"_l(\d+)%s$" % POOLING_SUFFIX_RE)
 
 
 def parse_translator(path: Path) -> TranslatorInfo:
@@ -53,16 +64,19 @@ def parse_translator(path: Path) -> TranslatorInfo:
         if not lm:
             raise ValueError(f"Cannot parse layer from model slug {slug!r} in {path.name}")
         layers.append(int(lm.group(1)))
-    pooling = "mean" if m.group("src").endswith("_mean") else "last"
+    def pooling_of_slug(slug: str) -> str:
+        return next((mode for mode, suf in POOLING_SUFFIXES.items() if slug.endswith(suf)), "last")
+
     return TranslatorInfo(
         path=path,
         name=stem,
         ttype=m.group("type"),
         loss=m.group("loss"),
-        pooling=pooling,
+        pooling=pooling_of_slug(m.group("src")),
         src_layer=layers[0],
         tgt_layer=layers[1],
         anchor=m.group("anchor") or "",
+        tgt_pooling=pooling_of_slug(m.group("tgt")),
     )
 
 

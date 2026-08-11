@@ -20,6 +20,18 @@ def test_model_slug_last_vs_mean():
     assert model_slug({**cfg, "token_position": -1}) == "Llama-3.2-3B-Instruct_l8"
 
 
+def test_model_slug_mask_never_collides():
+    cfg = {"name": "meta-llama/Llama-3.2-3B-Instruct", "layer": 8}
+    assert model_slug({**cfg, "token_position": "mask"}) == "Llama-3.2-3B-Instruct_l8_mask"
+    # a shared slug would make extraction reuse the other mode's cache and report
+    # success, so mask must differ from both last-token and mean
+    assert model_slug({**cfg, "token_position": "mask"}) != model_slug(cfg)
+    assert (model_slug({**cfg, "token_position": "mask"})
+            != model_slug({**cfg, "token_position": "mean"}))
+    # an unregistered token_position is a single-position readout: bare slug
+    assert model_slug({**cfg, "token_position": 0}) == "Llama-3.2-3B-Instruct_l8"
+
+
 def test_sv_path_roundtrip():
     p = sv_path("root", "meta-llama/Llama-3.2-3B-Instruct", "CAA", "sycophancy", "residual", 8)
     # model name '/' is slugged to '_' in the tree

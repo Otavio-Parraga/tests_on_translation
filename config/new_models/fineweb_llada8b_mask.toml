@@ -1,0 +1,84 @@
+# Cross-ARCHITECTURE translation target: Llama-3.2-1B (source) -> LLaDA-8B-Instruct (target),
+# extracting at an appended [MASK] position instead of mean-pooling.
+#
+# This is the MASK-POSITION arm of the diffusion-target study. It is identical to
+# config/new_models/fineweb_llada8b.toml in every respect except the target's
+# token_position, so the two are a clean controlled comparison of *where* to read a
+# diffusion LM's representation. See that file's header for the model description and
+# the utils/hf.py compatibility shims — all of it applies unchanged here.
+#
+# token_position = "mask": append one [MASK] token after the sentence and read the
+# hidden state at that position. The motivation is that mean-pooling measures the
+# model's representation of text that ALREADY EXISTS, whereas a steering vector is
+# added to the residual stream *during generation* — and at generation time a
+# diffusion LM's sequence is mostly [MASK] tokens being iteratively denoised. Fitting
+# on clean-text means and applying during masked denoising is a regime mismatch.
+#
+# The mask position is the one slot LLaDA was actually TRAINED to answer "what token
+# belongs here" at, which makes it the structural analogue of the last token in a
+# causal model (where CAA-style steering vectors are both extracted and applied).
+# It is also the position the A/B eval reads its logits from, so a vector fit here is
+# fit in the same space it will be applied in.
+#
+# Implementation: extraction still runs a SINGLE clean forward pass over the
+# unmasked sentence plus the one appended mask — never the iterative denoising loop.
+# The mask id comes from resolve_mask_token_id() in utils/hf.py, which must consult
+# both the tokenizer and the config because the two LLaDA families disagree about
+# where it lives (this model: config.mask_token_id = 126336, tokenizer has no
+# mask_token at all; LLaDA2.0-mini is the reverse). Sentences are truncated to 511
+# rather than 512 so the widened sequence still fits the same budget.
+#
+# CACHE NAMING: token_position = "mask" earns a _mask filename suffix (see
+# POOLING_SUFFIXES in utils/paths.py), so these activations land in
+# LLaDA-8B-Instruct_l{N}_mask.pt and can coexist with the _mean caches from the
+# sibling config. This is load-bearing, not cosmetic: extraction SKIPS any cache
+# whose n_sentences already matches, so a shared slug would make this run silently
+# reuse the mean activations and report success.
+#
+# Layer sweep: {10,12,14,16,18,20,22}, identical to the mean arm so the two are
+# comparable layer-for-layer.
+#
+# Extract activations across the sweep (network-free, reuses data/fineweb/sentences.json):
+#   CUDA_VISIBLE_DEVICES=2 conda run -p /mnt/C-SSD/parraga/conda_envs/act_eng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_llada8b_mask.toml --layers 10 12 14 16 18 20 22
+#
+# Peak GPU memory: ~16GB, same as the mean arm (one extra token per row is noise).
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW. The map here changes
+# dimension 2048 -> 4096.
+
+batch_size = 16   # matches the mean arm so the two runs are comparable
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+# Stays -1: Llama is causal and has NO mask token, so "mask" is meaningless on the
+# source side (resolve_mask_token_id would raise). Reusing the existing
+# Llama-3.2-1B-Instruct_l8.pt cache also means this arm costs only target extraction.
+token_position = -1
+
+[target_model]
+name = "GSAI-ML/LLaDA-8B-Instruct"
+layer = 16                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mask"   # see header — the appended [MASK] readout
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 30000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb"            # sentences.json + activation caches (shared)
+output_dir = "outputs/new_models"    # Procrustes checkpoint output (fit later)
+seed = 42
+train_ratio = 0.8
+normalize_activations = false        # RAW activations — see header
