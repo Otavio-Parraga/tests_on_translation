@@ -27,13 +27,35 @@ if not hasattr(DynamicCache, "get_usable_length"):
 _orig_finalize_model_loading = PreTrainedModel._finalize_model_loading
 
 
+def _patch_tie_weights_signature(cls):
+    """Make cls.tie_weights tolerate the transformers-5.x kwargs by ignoring them.
+
+    Patched on the CLASS, never on the instance. An earlier version of this shim
+    stored `lambda **kwargs: bound_tie_weights()` on the model, which built a
+    reference cycle (model.__dict__ -> lambda -> closure cell -> bound method ->
+    model). Refcounting cannot break a cycle, so `del model` in the extraction
+    loop freed nothing and torch.cuda.empty_cache() had nothing to return — every
+    per-layer reload stranded a full copy of the weights on the GPU until the
+    generational GC happened to run, which OOM'd the sweep partway through.
+    A class-level patch captures only the original *function*, so no model is
+    referenced and instances die by refcount alone."""
+    if getattr(cls, "_acttrans_tie_weights_compat", False):
+        return
+    if {"missing_keys", "recompute_mapping"} <= set(inspect.signature(cls.tie_weights).parameters):
+        return  # already the new signature — nothing to adapt
+    orig_tie_weights = cls.tie_weights
+
+    def tie_weights(self, *args, **kwargs):
+        return orig_tie_weights(self)
+
+    cls.tie_weights = tie_weights
+    cls._acttrans_tie_weights_compat = True
+
+
 def _finalize_model_loading_compat(model, load_config, loading_info):
     if not hasattr(model, "all_tied_weights_keys"):
         model.all_tied_weights_keys = {}
-    accepted = set(inspect.signature(model.tie_weights).parameters)
-    if not {"missing_keys", "recompute_mapping"} <= accepted:
-        bound_tie_weights = model.tie_weights
-        model.tie_weights = lambda **kwargs: bound_tie_weights()
+    _patch_tie_weights_signature(type(model))
     return _orig_finalize_model_loading(model, load_config, loading_info)
 
 
@@ -62,7 +84,7 @@ def _default_rope_parameters_compat(config, device=None, seq_len=None):
 ROPE_INIT_FUNCTIONS.setdefault("default", _default_rope_parameters_compat)
 
 
-def _wrap_forward_for_block_attention_mask(model):
+def _patch_forward_for_block_attention_mask(cls):
     """Compatibility shim: inclusionAI/LLaDA2.0-mini's forward() rejects the
     standard (B, T) padding mask every other model here accepts, requiring instead
     a pre-built (B, 1, T, T) block-diffusion attention bias (see its own
@@ -71,18 +93,27 @@ def _wrap_forward_for_block_attention_mask(model):
     iterative block-denoising loop — which collapses that convention to full
     bidirectional attention restricted to real (non-pad) key positions. Build that
     here from the ordinary 2D mask so callers (dataset.py, ab_eval.py) stay
-    unchanged."""
-    orig_forward = model.forward
+    unchanged.
 
-    def forward(*args, **kwargs):
+    Patched on the CLASS, and reading dtype off `self`, so nothing that references
+    a model instance is stored on the instance — see
+    _patch_tie_weights_signature's docstring for the reference-cycle leak that an
+    instance-level `model.forward = ...` caused here (~33 GB stranded per
+    per-layer reload for this model, which is 16B params resident)."""
+    if getattr(cls, "_acttrans_block_mask_compat", False):
+        return
+    orig_forward = cls.forward
+
+    def forward(self, *args, **kwargs):
         attention_mask = kwargs.get("attention_mask")
         if attention_mask is not None and attention_mask.dim() == 2:
             b, t = attention_mask.shape
             allow = attention_mask[:, None, None, :].to(torch.float32).expand(b, 1, t, t).clone()
-            kwargs["attention_mask"] = allow.log().to(model.dtype)
-        return orig_forward(*args, **kwargs)
+            kwargs["attention_mask"] = allow.log().to(self.dtype)
+        return orig_forward(self, *args, **kwargs)
 
-    model.forward = forward
+    cls.forward = forward
+    cls._acttrans_block_mask_compat = True
 
 
 def load_model_and_tokenizer(model_name: str, device: str, dtype=torch.bfloat16):
@@ -110,9 +141,9 @@ def load_model_and_tokenizer(model_name: str, device: str, dtype=torch.bfloat16)
     if not hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
-    # See _wrap_forward_for_block_attention_mask's docstring.
+    # See _patch_forward_for_block_attention_mask's docstring.
     if getattr(model.config, "model_type", None) == "llada2_moe":
-        _wrap_forward_for_block_attention_mask(model)
+        _patch_forward_for_block_attention_mask(type(model))
 
     return model, tokenizer
 

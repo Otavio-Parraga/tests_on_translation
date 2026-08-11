@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import shutil
@@ -201,7 +202,22 @@ def extract_activations_with_resume(
         finally:
             handle.remove()
 
-        del model
+        # Release the weights before the caller loads the next layer's copy.
+        # `layer` and `captured` are dropped too: `layer` holds a decoder block (so
+        # its parameters), and `captured` holds the last batch's GPU attention mask.
+        #
+        # gc.collect() is not paranoia here. empty_cache() can only return memory
+        # that no live tensor holds, so anything keeping the model reachable keeps
+        # its weights resident — and a reference CYCLE keeps an object reachable
+        # even after `del`, since refcounting alone cannot break one. That is
+        # exactly what stranded ~16 GB per reload until the sweep OOM'd (the two
+        # compat shims in utils/hf.py used to build such a cycle; they now patch at
+        # class level). One collection per layer costs milliseconds against a
+        # multi-minute extraction, and makes this loop robust to the next shim that
+        # accidentally captures a model.
+        captured.clear()
+        del model, layer
+        gc.collect()
         torch.cuda.empty_cache()
 
     # Merge all batch files into the final output file
