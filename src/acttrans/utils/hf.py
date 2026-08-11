@@ -70,15 +70,66 @@ PreTrainedModel._finalize_model_loading = staticmethod(_finalize_model_loading_c
 # `config.rope_theta` or the newer nested `config.rope_parameters["rope_theta"]`.
 # setdefault is a no-op for any model that already special-cases "default" itself.
 def _default_rope_parameters_compat(config, device=None, seq_len=None):
-    if getattr(config, "rope_parameters", None):
+    # theta: prefer the FLAT config.rope_theta. It is the field the checkpoint's own
+    # config.json carries and the one the vendored attention reads
+    # (self.rope_theta = config.rope_theta), whereas transformers 5.1's migration
+    # synthesizes config.rope_parameters with a 10000.0 default that can silently
+    # disagree — LLaDA2.0-mini ships rope_theta 600000 but reports 10000.0 nested.
+    base = getattr(config, "rope_theta", None)
+    if base is None:
         base = config.rope_parameters["rope_theta"]
-    else:
-        base = config.rope_theta
-    dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    head_dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+    # partial_rotary_factor: only the first fraction of each head is rotated
+    # (LLaDA2.0-mini rotates half of its 128-wide heads, so dim 64 -> 32 freqs).
+    # Ignoring it yields a table of the wrong length AND the wrong frequencies,
+    # because dim appears in the exponent's denominator too.
+    partial = getattr(config, "partial_rotary_factor", None) or 1.0
+    dim = int(head_dim * partial)
     inv_freq = 1.0 / (
         base ** (torch.arange(0, dim, 2, dtype=torch.int64).to(device=device, dtype=torch.float) / dim)
     )
     return inv_freq, 1.0
+
+
+def _repair_rope_buffers(model):
+    """Recompute rotary inv_freq tables that were never materialized.
+
+    LLaDA2.0-mini's LLaDA2MoeRotaryEmbedding registers inv_freq with
+    ``persistent=False``, so it is absent from the checkpoint and the weight
+    loader never restores it. It is computed once in __init__ — which, under
+    transformers 5.x fast init, runs on the META device. A meta tensor carries no
+    storage, so the subsequent ``.to(cuda)`` produces UNINITIALIZED memory instead
+    of the frequency table: observed values were a denormal (3.5e-41) and zeros.
+
+    That is worse than a crash. Uninitialized memory varies run to run, so the
+    same extraction silently produced NaN in some layers and finite-but-wrong
+    activations in others — which is exactly how 10 corrupt caches passed as OK.
+
+    Gated on the buffer actually being unhealthy, so this is a strict no-op for
+    every model whose rotary table is already correct (all the causal models here),
+    leaving their existing activation caches reproducible."""
+    for module in model.modules():
+        init_fn = getattr(module, "rope_init_fn", None)
+        buf = getattr(module, "inv_freq", None)
+        if init_fn is None or not torch.is_tensor(buf):
+            continue
+        # A valid inv_freq is 1/base**x: every entry strictly positive and finite.
+        healthy = (
+            not buf.is_meta
+            and bool(torch.isfinite(buf).all())
+            and bool((buf > 0).all())
+        )
+        if healthy:
+            continue
+        device = buf.device if not buf.is_meta else next(model.parameters()).device
+        inv_freq, attention_scaling = init_fn(module.config, device)
+        module.register_buffer("inv_freq", inv_freq.to(device), persistent=False)
+        module.original_inv_freq = module.inv_freq
+        module.attention_scaling = attention_scaling
+        print(
+            f"  [hf] repaired uninitialized rotary inv_freq on "
+            f"{type(module).__name__} ({tuple(inv_freq.shape)})"
+        )
 
 
 ROPE_INIT_FUNCTIONS.setdefault("default", _default_rope_parameters_compat)
@@ -144,6 +195,10 @@ def load_model_and_tokenizer(model_name: str, device: str, dtype=torch.bfloat16)
     # See _patch_forward_for_block_attention_mask's docstring.
     if getattr(model.config, "model_type", None) == "llada2_moe":
         _patch_forward_for_block_attention_mask(type(model))
+
+    # Must run after .to(device): the repair writes the table on the real device,
+    # and the corruption it fixes is caused by that very move. See its docstring.
+    _repair_rope_buffers(model)
 
     return model, tokenizer
 

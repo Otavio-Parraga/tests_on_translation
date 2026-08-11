@@ -75,6 +75,17 @@ step "STEP 2/2  LLaDA2.0-mini activations (layers 6 8 10 12 14)" \
   $RUN extract_activations_sweep.py \
     --config config/new_models/fineweb_llada2mini.toml --layers 6 8 10 12 14
 
+# --- integrity: extraction exiting 0 is NOT evidence the caches are usable ------
+# A corrupt model yields structurally perfect output (right shape, count, dtype),
+# so every signal above reports success. This is the step that actually looks at
+# the numbers; without it a sweep can and did report OK over caches of NaN.
+step "VERIFY  LLaDA-8B-Instruct caches" \
+  $RUN scripts/verify_activations.py \
+    --config config/new_models/fineweb_llada8b.toml --layers 10 12 14 16 18 20 22
+step "VERIFY  LLaDA2.0-mini caches" \
+  $RUN scripts/verify_activations.py \
+    --config config/new_models/fineweb_llada2mini.toml --layers 6 8 10 12 14
+
 echo
 echo "############################################################"
 echo "# SUMMARY  $(date '+%Y-%m-%d %H:%M:%S')"

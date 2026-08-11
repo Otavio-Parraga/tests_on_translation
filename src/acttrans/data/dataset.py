@@ -137,7 +137,12 @@ def extract_activations_with_resume(
             mask = captured["attention_mask"]  # [B, T]
             if pooling_mean:
                 m = mask.unsqueeze(-1).to(hidden.dtype)  # [B, T, 1]
-                summed = (hidden * m).sum(dim=1)
+                # masked_fill, not `hidden * m`: multiplying by a 0 mask turns a
+                # non-finite pad-position value into NaN (0 * NaN = NaN) and
+                # poisons the whole pooled vector, so garbage at a position that
+                # is meant to be EXCLUDED still decides the result. Substituting
+                # zeros makes the exclusion real.
+                summed = hidden.masked_fill(m == 0, 0.0).sum(dim=1)
                 counts = m.sum(dim=1).clamp(min=1.0)
                 captured["act"] = (summed / counts).detach().cpu()
             elif pooling_mask:
@@ -198,7 +203,21 @@ def extract_activations_with_resume(
                         model(**encoded)
                     except _StopForward:
                         pass
-                torch.save(captured["act"], batch_dir / f"batch_{n_existing + step:06d}.pt")
+                act = captured["act"]
+                # Fail on the FIRST bad batch rather than writing 30000 rows of
+                # NaN and exiting 0. A corrupt model (e.g. a rotary table left
+                # uninitialized) produces activations that are structurally
+                # perfect — right shape, right count, right dtype — so nothing
+                # downstream notices until a translator trains to nothing.
+                if not torch.isfinite(act).all():
+                    n_bad = int((~torch.isfinite(act)).any(dim=1).sum())
+                    raise RuntimeError(
+                        f"Non-finite activations in batch {n_existing + step} "
+                        f"({n_bad}/{act.shape[0]} rows) for {model_cfg['name']} "
+                        f"layer {model_cfg['layer']}. Refusing to write a corrupt "
+                        f"cache. Sentences {start_idx + i}..{start_idx + i + len(batch) - 1}."
+                    )
+                torch.save(act, batch_dir / f"batch_{n_existing + step:06d}.pt")
         finally:
             handle.remove()
 

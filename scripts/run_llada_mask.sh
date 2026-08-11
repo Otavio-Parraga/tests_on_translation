@@ -86,6 +86,14 @@ step "STEP 2/2  LLaDA2.0-mini mask-position activations (layers 6 8 10 12 14)" \
   $RUN extract_activations_sweep.py \
     --config config/new_models/fineweb_llada2mini_mask.toml --layers 6 8 10 12 14
 
+# --- integrity: see the equivalent block in run_llada_all.sh --------------------
+step "VERIFY  LLaDA-8B-Instruct mask caches" \
+  $RUN scripts/verify_activations.py \
+    --config config/new_models/fineweb_llada8b_mask.toml --layers 10 12 14 16 18 20 22
+step "VERIFY  LLaDA2.0-mini mask caches" \
+  $RUN scripts/verify_activations.py \
+    --config config/new_models/fineweb_llada2mini_mask.toml --layers 6 8 10 12 14
+
 echo
 echo "############################################################"
 echo "# SUMMARY  $(date '+%Y-%m-%d %H:%M:%S')"
