@@ -3,6 +3,16 @@
 The heavy machinery shared by ab_comparison.py and ab_sweep.py: the additive
 steering hook, the A/B probability metric, and the by-coefficient aggregation.
 Replicates the evaluation from activation_engineering (evaluation/guidance.py).
+
+TWO READOUT POSITIONS. For a causal LM the answer letter is the next token after
+"Answer: (", so P(A)/P(B) is read at the final position. A masked-diffusion LM
+(LLaDA family) is trained to predict tokens ONLY at [MASK] positions; at an
+ordinary final position its logits are off-distribution, and measurably so —
+on LLaDA-8B-Instruct the final position puts a mean P(A)+P(B) of 0.0004 on the
+two answer letters, versus 0.998 at an appended [MASK] over the same items. The
+metric therefore has essentially no mass to move there, and a steering sweep
+reads as a flat line of noise no matter how good the translated vector is. Which
+position is used is chosen per model by ``needs_mask_readout`` below.
 """
 
 from contextlib import contextmanager
@@ -13,7 +23,7 @@ from typing import List
 import torch
 from tqdm import tqdm
 
-from ..utils.hf import get_layer
+from ..utils.hf import append_mask_token, get_layer, resolve_mask_token_id
 
 
 @dataclass
@@ -55,6 +65,23 @@ def prompt_len(tok, messages) -> int:
     return tok(text, return_tensors="pt", add_special_tokens=False)["input_ids"].shape[1]
 
 
+# Masked-diffusion LMs, whose A/B readout must happen at an appended [MASK]
+# rather than at the final position — see the module docstring. Gating on
+# config.model_type rather than on "does the tokenizer expose a mask token"
+# keeps this decision explicit: it is a statement about what the model was
+# TRAINED to predict where, not about which special tokens happen to exist.
+MASKED_DIFFUSION_MODEL_TYPES = frozenset({"llada", "llada2_moe"})
+
+
+def needs_mask_readout(model) -> bool:
+    """True if this model scores A/B at an appended [MASK] instead of the last position.
+
+    ``llada`` is GSAI-ML/LLaDA-8B-Instruct, ``llada2_moe`` is
+    inclusionAI/LLaDA2.0-mini. Every causal LM in this repo returns False and so
+    keeps the original last-position readout, byte-for-byte."""
+    return getattr(getattr(model, "config", None), "model_type", None) in MASKED_DIFFUSION_MODEL_TYPES
+
+
 def run_ab_eval(
     model,
     tok,
@@ -64,18 +91,30 @@ def run_ab_eval(
     module_name: str,
     coefficients: List[float],
     limit: int = None,
+    mask_readout: bool = None,
 ) -> List[ABResult]:
     """
     Closed-ended A/B evaluation following nrimsky/CAA:
       - prompt = chat_template(question) + "Answer: ("
-      - logits at last token → P(A) and P(B)
+      - logits at the readout position → P(A) and P(B)
       - metric: avg P(answer matching behavior)
+
+    The readout position is the final token for a causal LM, or an appended
+    [MASK] for a masked-diffusion LM — see the module docstring for why this is
+    not cosmetic. ``mask_readout`` defaults to auto-detection via
+    ``needs_mask_readout(model)``; pass True/False only to force one path (e.g.
+    to reproduce the pre-fix numbers on a diffusion target).
     """
     if limit:
         items = items[:limit]
 
     a_id = tok.encode("A", add_special_tokens=False)[-1]
     b_id = tok.encode("B", add_special_tokens=False)[-1]
+
+    use_mask = needs_mask_readout(model) if mask_readout is None else mask_readout
+    # Resolved once, outside the loop: it raises for a model with no mask token,
+    # and that should fail immediately rather than midway through a sweep.
+    mask_id = resolve_mask_token_id(model, tok) if use_mask else None
 
     results: List[ABResult] = []
 
@@ -93,6 +132,22 @@ def run_ab_eval(
             )
             tokens = tok(full, return_tensors="pt", add_special_tokens=False).to(model.device)
 
+            if use_mask:
+                # One un-padded row, so the appended [MASK] lands at the final
+                # column — but read it by its returned index rather than -1, so
+                # this stays correct if the caller ever batches padded rows.
+                # It sits past `plen`, so apply_steering's hook steers it along
+                # with the rest of the answer region, exactly as the final token
+                # is steered in the causal path.
+                ids, attn, mask_pos = append_mask_token(
+                    tokens, mask_id, tok.pad_token_id,
+                    padding_side=getattr(tok, "padding_side", "right"),
+                )
+                tokens = {"input_ids": ids, "attention_mask": attn}
+                read_at = int(mask_pos[0])
+            else:
+                read_at = -1
+
             with torch.no_grad():
                 if coeff == 0:
                     out = model(**tokens)
@@ -100,7 +155,7 @@ def run_ab_eval(
                     with apply_steering(model, layer_idx, module_name, sv, coeff, plen):
                         out = model(**tokens)
 
-            probs = torch.softmax(out.logits[0, -1, :], dim=-1)
+            probs = torch.softmax(out.logits[0, read_at, :], dim=-1)
             a_p = probs[a_id].item()
             b_p = probs[b_id].item()
 

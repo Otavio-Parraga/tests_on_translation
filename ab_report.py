@@ -472,7 +472,8 @@ new MutationObserver(renderAll).observe(document.documentElement, { attributes: 
 """
 
 
-def build_html(rows, summary, source_curve, source_stats, path, coherent_max=5.0):
+def build_html(rows, summary, source_curve, source_stats, path, coherent_max=5.0,
+                notes_html=None):
     behaviors = sorted({r["behavior"] for r in rows})
     coeffs = sorted({r["coefficient"] for r in rows})
 
@@ -776,6 +777,8 @@ def build_html(rows, summary, source_curve, source_stats, path, coherent_max=5.0
   <div class="tiles">{tiles_html}</div>
 </header>
 
+{f'<section id="guidance"><h2>Guidance</h2><div class="cards">{notes_html}</div></section>' if notes_html else ""}
+
 <section id="metrics">
   <h2>How to read this report</h2>
   <p class="section-note">
@@ -838,6 +841,12 @@ def main():
                          "source steers cleanly through |c|<=5 and is fully collapsed "
                          "(P->0 both sides) by |c|=10. Collapse onset is behavior-"
                          "dependent (~+-2 to +-5), so treat this as a heuristic.")
+    ap.add_argument("--notes-html", default=None,
+                    help="Path to an HTML fragment (a sequence of elements, e.g. "
+                         "<div class='card'>...</div> blocks) rendered as a 'Guidance' "
+                         "section right after the header tiles. For hand-written "
+                         "interpretation/recommendations that don't come from the "
+                         "result rows themselves.")
     args = ap.parse_args()
 
     out = Path(args.out_dir)
@@ -858,8 +867,9 @@ def main():
     write_results_csv(rows, out / "results.csv")
     summary, source_curve, source_stats = build_summary(rows, args.coherent_max)
     write_summary_csv(summary, out / "summary.csv")
+    notes_html = Path(args.notes_html).read_text() if args.notes_html else None
     build_html(rows, summary, source_curve, source_stats, out / "report.html",
-               args.coherent_max)
+               args.coherent_max, notes_html=notes_html)
 
     print(f"  Wrote:\n    {out/'results.csv'}\n    {out/'summary.csv'}\n    {out/'report.html'}")
 

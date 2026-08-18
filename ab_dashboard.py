@@ -61,6 +61,35 @@ DATASETS = [
     {"id": "l8_to_l12", "label": "l8→l12 confirmation",
      "sub": "Best config re-checked at Llama-3.2-1B l8 → Llama-3.2-3B l12",
      "dir": _HERE / "outputs" / "ab_eval" / "l8_to_l12", "coherent_max": 5.0},
+    # Diffusion target. Two things about this run differ from every entry above.
+    # (1) Its A/B probabilities are read at an appended [MASK], not at the final
+    #     position — LLaDA is only trained to predict at mask positions, and at the
+    #     final position mean P(A)+P(B) is 0.0004 versus 0.998 at the mask, so the
+    #     pre-fix curves were flat noise (see evaluation/ab_eval.py's docstring).
+    # (2) Its `pooling` dimension is load-bearing rather than incidental: `mean`
+    #     and `mask` are two genuinely different readouts of the same sentence
+    #     (per-row cosine 0.922 +- 0.011), each with its own translator, so the
+    #     config label's third field is the mean-vs-mask comparison.
+    # coherent_max stays 5.0 for comparability with the runs above, though it is a
+    # conservative window here: these translated vectors carry |sv| = 8.8-12.5 into
+    # a residual stream whose mean ||h|| is 104, so |coeff| = 5 is only ~0.5x the
+    # residual norm — less of a collapse threshold than it is for the Llama pairs.
+    {"id": "llada", "label": "Diffusion target (LLaDA-8B)",
+     "sub": "Llama-3.2-1B l8 → LLaDA-8B-Instruct l{10..22}, mean/mask × plain/whitened Procrustes",
+     "dir": _HERE / "outputs" / "ab_eval" / "llada", "coherent_max": 5.0},
+    # Second diffusion target: same setup as "llada" above (mean/mask readout,
+    # plain/whitened Procrustes) but on inclusionAI/LLaDA2.0-mini (masked-
+    # diffusion MoE, 20 layers, ~1.4B active/~16B total params) instead of
+    # GSAI-ML/LLaDA-8B-Instruct. Its coefficient grid is wider (29 points vs 17 —
+    # see scripts/run_ab_llada2mini.sh) since this model has no prior A/B run to
+    # read a collapse threshold off of; a wider per-record coeff list is fine
+    # here, ab_pivot_dashboard.py's axis is built as the union across all
+    # records, not assumed shared. coherent_max stays 5.0 for comparability with
+    # every entry above, though — as with "llada" — it is a conservative window
+    # until this model's own |sv| vs. mean-residual-norm ratio is measured.
+    {"id": "llada2mini", "label": "Diffusion target (LLaDA2.0-mini)",
+     "sub": "Llama-3.2-1B l8 → LLaDA2.0-mini l{6..14}, mean/mask × plain/whitened Procrustes",
+     "dir": _HERE / "outputs" / "ab_eval" / "llada2mini", "coherent_max": 5.0},
 ]
 
 

@@ -14,7 +14,7 @@ import json
 import re
 from pathlib import Path
 
-from ..utils.paths import POOLING_SUFFIX_RE
+from ..utils.paths import POOLING_SUFFIX_RE, POOLING_SUFFIXES
 
 
 def load_rows_jsonl(patterns, methods=None):
@@ -92,6 +92,33 @@ def parse_translator_models(tr):
     if len(parts) >= 3 and parts[0] == "best_translator":
         return _MODEL_L_RE.sub("", parts[1]), _MODEL_L_RE.sub("", parts[2])
     return None, None
+
+
+def parse_target_pooling(tr, default="last"):
+    """Target-side extraction mode of a translator name: 'last' | 'mean' | 'mask'.
+
+    'best_translator__Llama-3.2-1B-Instruct_l8__LLaDA-8B-Instruct_l22_mask__linear__procrustes'
+    -> 'mask'.
+
+    Read off the TARGET slug, not the source's, and derived from the name rather
+    than from a results column, for two reasons. First, the `pooling` column that
+    ab_sweep writes is the SOURCE side's mode (TranslatorInfo.pooling), which for a
+    diffusion study reads "last" for every arm — the causal source never changes —
+    so grouping by it silently merges the mean and mask arms into one label. In the
+    pivot dashboard, whose record key is (model, config, behavior, layer), merging
+    them does not just mislabel: the second arm is dropped as a duplicate. Second,
+    the translator name is present in every row ever written, so this works on
+    historical results.csv files and on runs already in flight, where a
+    newly-added column would be missing or half-populated.
+
+    Returns `default` for a name that carries no pooling suffix (every causal run)
+    or that doesn't follow the convention (e.g. a native row)."""
+    parts = tr.split("__")
+    if len(parts) >= 3 and parts[0] == "best_translator":
+        tgt = parts[2]
+        return next((mode for mode, suf in POOLING_SUFFIXES.items()
+                     if tgt.endswith(suf)), default)
+    return default
 
 
 def parse_native_model(tr, fallback):

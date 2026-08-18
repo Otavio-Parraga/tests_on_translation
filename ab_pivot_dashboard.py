@@ -11,7 +11,7 @@ pool of "records" -- (target_model, config, behavior, layer) -> per-coefficient
 P(behavior)/accuracy curves -- and the page lets you pivot freely.
 
 "config" folds translator_type/loss/pooling/norm_mode into one label (the
-direct analog of the reference's "method" dimension), plus two special
+direct analog of the reference's "method" dimension), plus four special
 pseudo-configs:
   SOURCE  -- the original Llama-3.2-1B CAA vector. Its curve doesn't depend on
              the target model, so it's replicated across every (model, layer)
@@ -21,6 +21,26 @@ pseudo-configs:
   NATIVE  -- the target model's own from-scratch CAA vector at that layer,
              where such a run exists (present for the new_models and
              layer_sweep sweeps).
+  LOBO/plain, LOBO/whiten -- the leave-one-behavior-out study (LLaDA-8B only,
+             outputs/ab_eval/llada_lobo, produced by fit_procrustes_lobo.py):
+             the Procrustes map was fit on the other 6 behaviors' CAA
+             difference vectors and evaluated on the excluded one. Unlike
+             every other config, "config" and "behavior" are coupled here --
+             each LOBO/{variant} config is really a different translator per
+             behavior, the one that excluded it -- so the held-out behavior is
+             just whatever the Behavior selector is set to. Compare against
+             the ordinary translated config at the same (model, layer,
+             mean-pooling) to see what fitting on the behavior itself bought
+             you -- MAIN/plain and MAIN/whiten below are a shortcut for
+             exactly that comparison.
+  MAIN/plain, MAIN/whiten -- LOBO_MODEL's own mean-pooling translated config
+             (fit on generic FineWeb sentences, never touching ANY behavior's
+             diff vectors), aliased under a name that sits next to LOBO/plain
+             and LOBO/whiten. Pure duplicate of data already present under the
+             verbose translator_type/loss/pooling/norm_mode label -- not a
+             separate data source -- kept only so "LOBO vs. its upper-bound
+             baseline" is a 2-click comparison instead of requiring you to
+             know that label.
 
 One discovery method at a time (--method, default CAA): the page's x-axis is the
 raw coefficient, which means a different physical dose per method (CAA vectors
@@ -42,6 +62,7 @@ from ab_dashboard import DATASETS  # the dashboard-run registry lives with its C
 from acttrans.evaluation.results_io import (
     load_rows_csv as load_rows,
     parse_native_model,
+    parse_target_pooling,
     parse_translator_models,
 )
 
@@ -49,6 +70,8 @@ _HERE = Path(__file__).resolve().parent
 TEMPLATE = _HERE / "ab_pivot_template.html"
 OUT = _HERE / "outputs" / "ab_eval" / "pivot_dashboard.html"
 COHERENT_MAX = 5.0
+LOBO_CSV = _HERE / "outputs" / "ab_eval" / "llada_lobo" / "results.csv"
+LOBO_MODEL = "LLaDA-8B-Instruct"
 
 
 def collect_file(rows):
@@ -82,11 +105,56 @@ def collect_file(rows):
             config = "NATIVE"
         else:  # target
             model = parse_translator_models(tr)[1] or dominant
-            config = f'{ex.get("translator_type", "")}/{ex.get("loss", "")}/{ex.get("pooling", "")}/{nm}'
+            # TARGET-side pooling, read off the translator name — the `pooling`
+            # column is the source side's mode, which is "last" for every arm of a
+            # diffusion run and would collapse mean and mask into one label. Since
+            # the record key below is (model, config, behavior, layer), that
+            # collapse would drop one whole arm as a duplicate rather than merely
+            # mislabel it. See results_io.parse_target_pooling.
+            pooling = parse_target_pooling(tr, default=ex.get("pooling", "") or "last")
+            config = f'{ex.get("translator_type", "")}/{ex.get("loss", "")}/{pooling}/{nm}'
         if not model:
             continue
 
         rec.update({"model": model, "config": config, "behavior": beh, "layer": ex["target_layer"]})
+        records.append(rec)
+    return records, source_curves
+
+
+def collect_lobo(rows):
+    """outputs/ab_eval/llada_lobo/results.csv rows -> (LOBO target records[],
+    source curves per behavior). Tagged with the LOBO/plain|LOBO/whiten
+    pseudo-config described in the module docstring, rather than run through
+    collect_file's generic translator_type/loss/pooling/norm_mode label --
+    each LOBO/{variant} config here is a different translator per behavior
+    (the one that excluded it), which that generic label has no way to say."""
+    blocks = defaultdict(list)
+    for r in rows:
+        blocks[(r["scope"], r.get("translator", ""), r["behavior"])].append(r)
+
+    records, source_curves = [], {}
+    for (scope, tr, beh), rs in blocks.items():
+        rs = sorted(rs, key=lambda r: r["coefficient"])
+        rec = {
+            "coeffs": [round(r["coefficient"], 4) for r in rs],
+            "behavior_prob": [round(r["avg_p_match"], 4) for r in rs],
+            "accuracy": [round(r["accuracy"], 4) for r in rs],
+            "n": max((int(r["n"]) for r in rs if r.get("n")), default=0),
+        }
+        ex = rs[0]
+
+        if scope == "source":
+            if beh not in source_curves or len(rec["coeffs"]) > len(source_curves[beh]["coeffs"]):
+                source_curves[beh] = rec
+            continue
+        if scope != "target":
+            continue
+
+        loss = ex.get("loss", "")
+        if "_lobo-" not in loss:
+            continue  # not actually a LOBO fit -- don't mislabel it as one
+        config = "LOBO/whiten" if "whiten" in loss else "LOBO/plain"
+        rec.update({"model": LOBO_MODEL, "config": config, "behavior": beh, "layer": ex["target_layer"]})
         records.append(rec)
     return records, source_curves
 
@@ -121,6 +189,46 @@ def main():
             if beh not in source_curves or len(curve["coeffs"]) > len(source_curves[beh]["coeffs"]):
                 source_curves[beh] = curve
         print(f"  {meta['id']}: {len(rows)} rows -> {len(recs)} target/native records")
+
+    if LOBO_CSV.exists():
+        lobo_rows = load_rows(LOBO_CSV, methods=(args.method,))
+        lobo_recs, lobo_srcs = collect_lobo(lobo_rows)
+        for r in lobo_recs:
+            key = (r["model"], r["config"], r["behavior"], r["layer"])
+            if key in seen:
+                continue
+            seen.add(key)
+            all_records.append(r)
+        for beh, curve in lobo_srcs.items():
+            if beh not in source_curves or len(curve["coeffs"]) > len(source_curves[beh]["coeffs"]):
+                source_curves[beh] = curve
+        print(f"  llada_lobo: {len(lobo_rows)} rows -> {len(lobo_recs)} LOBO target records")
+    else:
+        print(f"  skip llada_lobo: {LOBO_CSV} not found")
+
+    # MAIN/plain, MAIN/whiten: a shortcut alias of LOBO_MODEL's own mean-pooling
+    # translated config (the one already present under its verbose
+    # translator_type/loss/pooling/norm_mode label), so it sits next to
+    # LOBO/plain and LOBO/whiten for a 2-click "what did holding the behavior
+    # out cost you" comparison. Pure duplicate of data already in all_records,
+    # not a new data source.
+    n_main = 0
+    for r in list(all_records):
+        if r["model"] != LOBO_MODEL:
+            continue
+        parts = r["config"].split("/")
+        if len(parts) != 4 or parts[2] != "mean":
+            continue
+        alias_config = "MAIN/whiten" if "whiten" in parts[1] else "MAIN/plain"
+        key = (r["model"], alias_config, r["behavior"], r["layer"])
+        if key in seen:
+            continue
+        seen.add(key)
+        alias = dict(r, config=alias_config)
+        all_records.append(alias)
+        n_main += 1
+    if n_main:
+        print(f"  {n_main} MAIN/plain+MAIN/whiten alias records added")
 
     # replicate SOURCE into every (model, layer) pair that actually has data
     pairs = sorted({(r["model"], r["layer"]) for r in all_records})

@@ -89,6 +89,7 @@
   .legend .key { width:16px; height:0; border-top:2px solid; border-radius:2px; }
   .legend .key.dash { border-top-style: dashed; }
   .legend .key.thick { border-top-width: 3px; }
+  .legend .key.dot { border-top-style: dotted; border-top-width: 3px; }
   .legend .grad { width:120px; height:10px; border-radius:3px; }
 
   .note { font-size:12px; color:var(--muted); margin:8px 0 0; }
@@ -164,14 +165,18 @@ const PAYLOAD = /*__DATA__*/null;
 
   // ---- metric glossary (hover any dotted term instead of reading prose) --
   const GLOSSARY = {
-    response_config: {title: "config", body: "translator_type / loss / pooling / norm_mode of the learned map used to transport the SOURCE (Llama-3.2-1B) CAA vector onto the target model, at the given layer."},
+    response_config: {title: "config", body: "translator_type / loss / pooling / norm_mode of the learned map used to transport the SOURCE (Llama-3.2-1B) CAA vector onto the target model, at the given layer. SOURCE, NATIVE, LOBO/&hellip; (dotted lines) and MAIN/&hellip; are special pseudo-configs &mdash; see their own tips."},
     source: {title: "SOURCE", body: "The original Llama-3.2-1B CAA vector, evaluated on Llama-3.2-1B itself. The reference every translated (and native) vector is judged against &mdash; replicated across every model/layer filter so it's always available to compare."},
     native: {title: "NATIVE", body: "The target model's OWN CAA vector, trained from scratch on that model at that layer (not translated from anywhere). A ceiling: does this behavior direction work on this architecture at all, independent of translation quality?"},
+    lobo: {title: "LOBO (dotted)", body: "Leave-one-behavior-out, LLaDA-8B only. The Procrustes map was fit on the OTHER 6 behaviors' CAA difference vectors, then the excluded behavior's own steering vector was pushed through it &mdash; the genuinely-never-seen-this-behavior test. Unlike every other config, this one is coupled to the Behavior selector: whichever behavior you pick IS the one that was held out. Compare against <span class=\"metric-tip\" data-tip=\"main\">MAIN</span> to see what fitting on the behavior itself bought you."},
+    main: {title: "MAIN", body: "A shortcut alias for LLaDA-8B's own mean-pooling translated config, fit on generic FineWeb sentences that never touch ANY behavior's difference vectors &mdash; not this one, not the other 6. The upper-bound baseline for <span class=\"metric-tip\" data-tip=\"lobo\">LOBO</span>: how much do you lose by holding just the behavior itself out of a behavior-diff fit, versus never fitting on behavior data at all? Same data as the ordinary translated config at this layer + mean-pooling, just renamed to sit next to LOBO."},
     coherent: {title: "Coherent window", body: "At large |coefficient| the model collapses and P(behavior)→≈50% on BOTH sides — dead tails that spuriously agree. “Coherent only” restricts the x-axis to |coeff|≤5, where steering is still legible."},
+    readout: {title: "Readout position", body: "Where P(A)/P(B) is measured. Causal targets are read at the final token, after “Answer: (”. LLaDA-8B is a masked-diffusion LM, trained to predict tokens only at [MASK] positions, so it is read at an appended [MASK] instead: over the same items, mean P(A)+P(B) is 0.998 there versus 0.0004 at the final position. Read at the wrong position its curves are flat noise, so LLaDA rows here are NOT comparable with any produced before that readout existed."},
+    pooling: {title: "mean vs mask", body: "The third field of a config label — how the TRANSLATOR's target activations were extracted. <b>mean</b>: mask-weighted mean over every real token. <b>mask</b>: hidden state at an appended [MASK]. Two genuinely different readouts of the same sentence (per-row cosine 0.922 ± 0.011), each with its own fitted map, so this is the mean-vs-mask comparison. Only the diffusion target has both."},
   };
 
   // ---- dimension metadata ------------------------------------------------
-  const MODEL_SHORT = { "Llama-3.2-3B-Instruct": "Llama-3B", "Qwen2.5-0.5B-Instruct": "Qwen-0.5B", "gemma-3-1B-it": "Gemma-1B" };
+  const MODEL_SHORT = { "Llama-3.2-3B-Instruct": "Llama-3B", "Qwen2.5-0.5B-Instruct": "Qwen-0.5B", "gemma-3-1B-it": "Gemma-1B", "Phi-tiny-MoE-instruct": "Phi-MoE", "LLaDA-8B-Instruct": "LLaDA-8B ◈" };
   const modelLabel = v => MODEL_SHORT[v] || String(v);
   const layerLabel = v => "L" + v;
   const DIMS = {
@@ -318,8 +323,10 @@ const PAYLOAD = /*__DATA__*/null;
       cb.checked = state.compareSel.has(String(v));
       cb.onchange = () => { cb.checked ? state.compareSel.add(String(v)) : state.compareSel.delete(String(v)); render(); };
       const sp = document.createElement("span"); sp.textContent = DIMS[d].fmt(v);
-      if (d === "config" && (v === "SOURCE" || v === "NATIVE")) {
-        sp.className = "metric-tip"; sp.dataset.tip = v === "SOURCE" ? "source" : "native";
+      if (d === "config") {
+        const sv = String(v);
+        const tip = sv === "SOURCE" ? "source" : sv === "NATIVE" ? "native" : sv.startsWith("LOBO") ? "lobo" : sv.startsWith("MAIN") ? "main" : null;
+        if (tip) { sp.className = "metric-tip"; sp.dataset.tip = tip; }
       }
       lab.append(cb, sp); box.appendChild(lab);
     });
@@ -327,8 +334,12 @@ const PAYLOAD = /*__DATA__*/null;
 
     const hint = document.createElement("p"); hint.className = "note";
     hint.innerHTML = 'Hover <span class="metric-tip" data-tip="source">SOURCE</span>, ' +
-      '<span class="metric-tip" data-tip="native">NATIVE</span> or ' +
-      '<span class="metric-tip" data-tip="coherent">coherent-only</span> for what they mean.';
+      '<span class="metric-tip" data-tip="native">NATIVE</span>, ' +
+      '<span class="metric-tip" data-tip="lobo">LOBO/&hellip; ⋯</span>, ' +
+      '<span class="metric-tip" data-tip="main">MAIN/&hellip;</span>, ' +
+      '<span class="metric-tip" data-tip="coherent">coherent-only</span>, ' +
+      '<span class="metric-tip" data-tip="pooling">mean vs mask</span> or ' +
+      '<span class="metric-tip" data-tip="readout">readout position ◈</span> for what they mean.';
     $controls.appendChild(hint);
   }
   function ctl(labelText) { const w = document.createElement("div"); w.className="ctl";
@@ -396,7 +407,8 @@ const PAYLOAD = /*__DATA__*/null;
       if (!rec) { missing.push(DIMS[d].fmt(v)); return; }
       const pts = pointsFor(rec);
       const isSrc = rec.config === "SOURCE", isNative = rec.config === "NATIVE";
-      series.push({ value: String(v), label: DIMS[d].fmt(v), color: colorForValue(v), pts, n: rec.n, isSrc, isNative });
+      const isLobo = String(rec.config).startsWith("LOBO");
+      series.push({ value: String(v), label: DIMS[d].fmt(v), color: colorForValue(v), pts, n: rec.n, isSrc, isNative, isLobo });
     });
     return { series, missing };
   }
@@ -464,8 +476,8 @@ const PAYLOAD = /*__DATA__*/null;
     series.forEach(s => {
       const sorted = [...s.pts].sort((a,b)=>a.x-b.x);
       const dpath = sorted.map((p,i)=>`${i?"L":"M"}${X(p.x).toFixed(2)} ${Y(p.y).toFixed(2)}`).join(" ");
-      const dash = s.isSrc ? "6 4" : null;
-      const wdt = s.isSrc ? 2.5 : (s.isNative ? 3 : 2);
+      const dash = s.isSrc ? "6 4" : (s.isLobo ? "1.5 3.5" : null);
+      const wdt = s.isSrc ? 2.5 : (s.isNative ? 3 : (s.isLobo ? 3 : 2));
       const attrs = { d:dpath, fill:"none", stroke:s.color, "stroke-width":wdt, "stroke-linejoin":"round", "stroke-linecap":"round" };
       if (dash) attrs["stroke-dasharray"] = dash;
       mk("path", attrs, g);
@@ -539,7 +551,7 @@ const PAYLOAD = /*__DATA__*/null;
     }
     series.forEach(s => {
       const it = document.createElement("div"); it.className="item";
-      const k = document.createElement("span"); k.className="key" + (s.isSrc?" dash":"") + (s.isNative?" thick":"");
+      const k = document.createElement("span"); k.className="key" + (s.isSrc?" dash":"") + (s.isNative?" thick":"") + (s.isLobo?" dot":"");
       k.style.borderColor=s.color;
       const nm = document.createElement("span"); nm.textContent=s.label;
       it.append(k, nm); el.appendChild(it);
