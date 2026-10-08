@@ -265,22 +265,43 @@ def append_mask_token(encoded, mask_token_id: int, pad_token_id: int, padding_si
     return new_ids, new_attn, mask_pos
 
 
-def get_layer(model, layer_idx: int, module_name: str = "residual"):
-    """Architecture-agnostic decoder-layer lookup: Llama/Gemma/Qwen-style
+def _decoder_layers(model):
+    """Architecture-agnostic list of decoder layers: Llama/Gemma/Qwen-style
     ``model.model.layers``, GPT-style ``model.transformer.h``, or LLaDA-8B-style
-    ``model.model.transformer.blocks``. With module_name="residual" the layer
-    itself is returned (its output is the residual stream); otherwise the named
-    submodule of that layer."""
+    ``model.model.transformer.blocks``. Shared by get_layer (index one) and
+    iter_layers (yield all) so the architecture-detection branches exist once."""
     if hasattr(model, "model") and hasattr(model.model, "layers"):
-        layer = model.model.layers[layer_idx]
+        return model.model.layers
     elif hasattr(model, "transformer") and hasattr(model.transformer, "h"):
-        layer = model.transformer.h[layer_idx]
+        return model.transformer.h
     elif hasattr(model, "model") and hasattr(getattr(model.model, "transformer", None), "blocks"):
-        layer = model.model.transformer.blocks[layer_idx]
-    else:
-        raise ValueError(
-            f"Unsupported model architecture: {type(model)}. Expected Llama/Gemma-style "
-            "(model.model.layers), GPT-style (model.transformer.h), or LLaDA-8B-style "
-            "(model.model.transformer.blocks)."
-        )
+        return model.model.transformer.blocks
+    raise ValueError(
+        f"Unsupported model architecture: {type(model)}. Expected Llama/Gemma-style "
+        "(model.model.layers), GPT-style (model.transformer.h), or LLaDA-8B-style "
+        "(model.model.transformer.blocks)."
+    )
+
+
+def get_layer(model, layer_idx: int, module_name: str = "residual"):
+    """With module_name="residual" the layer itself is returned (its output is
+    the residual stream); otherwise the named submodule of that layer."""
+    layer = _decoder_layers(model)[layer_idx]
     return layer if module_name == "residual" else getattr(layer, module_name)
+
+
+def iter_layers(model):
+    """Every decoder layer, in order, whose output is the residual stream.
+
+    For a global intervention that subtracts the SAME direction at every layer
+    (activation-steering-by-projection, as opposed to this repo's existing
+    additive hook which targets one chosen layer) — register a hook on each of
+    these rather than looking up one index at a time."""
+    return list(_decoder_layers(model))
+
+
+def get_num_layers(model) -> int:
+    """Layer count via the same list get_layer/iter_layers index into, rather
+    than trusting a config field name (which differs across the two LLaDA
+    variants and isn't needed at all when the list itself is right there)."""
+    return len(_decoder_layers(model))

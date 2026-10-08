@@ -77,13 +77,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True,
-                    help="config/new_models/fineweb_llada8b.toml (mean) or "
+                    help="config/new_models/fineweb_llada8b.toml (mean/papersel) or "
                          "fineweb_llada8b_mask.toml (mask) — model/layer metadata only, "
                          "no activation cache is read from it.")
     ap.add_argument("--exclude-behavior", required=True, choices=BEHAVIORS)
     ap.add_argument("--source-layer", type=int, default=LAYER)
     ap.add_argument("--target-layer", type=int, required=True)
-    ap.add_argument("--arm", choices=["mean", "mask"], required=True)
+    ap.add_argument("--arm", choices=["mean", "mask", "papersel"], required=True)
     ap.add_argument("--source-diff", default=None)
     ap.add_argument("--target-diff", default=None)
     ap.add_argument("--whiten", action="store_true", default=False)

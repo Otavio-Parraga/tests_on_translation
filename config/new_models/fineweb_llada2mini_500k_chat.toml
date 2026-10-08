@@ -1,0 +1,60 @@
+# CHAT-TEMPLATED 500k companion of fineweb_llada2mini_500k.toml. Same model, same
+# 500k sentences, same layers — the ONLY difference is that every sentence is
+# wrapped in the model's chat template before the forward pass (chat_template =
+# true on both model blocks). See fineweb_llada8b_500k_chat.toml's header for the
+# rationale and the two-positions-in-one-pass scheme; only what differs for THIS
+# model is repeated here.
+#
+#   fineweb_llada2mini_500k.toml       raw        data/fineweb_500k        (complete, untouched)
+#   fineweb_llada2mini_500k_chat.toml  templated  data/fineweb_500k_chat   (this file)
+#
+# This model's template opens a SYSTEM role and ends with "<role>ASSISTANT</role>"
+# (18 template tokens/row), so the -1 read position is the closing "</role>" — the
+# token immediately before generation, the post-instruction analogue of the 8B's
+# trailing "\n". Verified stable across rows; tokenizer pads right.
+#
+# Layer sweep: {6,8,10,12,14} = the existing middle-third sweep of 20 layers,
+# PLUS {16}: the paper's best layer for LLaDA-8B (23 of 32 = 72% depth) maps to
+# ~14.4 here, so 16 brackets it from above. Disk: ~2.1 GiB per cache (500k x 2048
+# x bf16 + sentences), x6 layers x2 positions ~= 25 GiB.
+#
+# CAVEAT — validation, not extraction: the closed-ended A/B eval currently reads
+# P(match) ~ 4e-6 on this model (outputs/ab_eval/llada2mini), i.e. the readout is
+# broken for it, so these caches can be fitted but their mean-vs-position choice
+# cannot be validated by A/B until that is fixed.
+#
+# Full pipeline: scripts/run_llada_500k_chat.sh
+
+batch_size = 8    # same as fineweb_llada2mini_500k.toml (16B total params resident)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+chat_template = true
+
+[target_model]
+name = "inclusionAI/LLaDA2.0-mini"
+layer = 14                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mean"   # default arm; see 8B header
+chat_template = true
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 500000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb_500k_chat"      # templated caches, separate from the raw 500k dir
+output_dir = "outputs/new_models_500k_chat"
+seed = 42
+train_ratio = 0.8
+normalize_activations = false            # RAW activations — see header

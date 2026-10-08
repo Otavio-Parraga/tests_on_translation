@@ -46,40 +46,45 @@ DEFAULT_OUT = _HERE / "outputs" / "ab_eval"
 
 def write_results_csv(rows, path):
     cols = ["method", "scope", "translator", "translator_type", "loss", "pooling",
-            "norm_mode", "behavior", "coefficient", "avg_p_match", "accuracy",
-            "n", "sv_norm", "source_layer", "target_layer"]
+            "norm_mode", "steering_mode", "behavior", "coefficient", "avg_p_match",
+            "accuracy", "n", "sv_norm", "source_layer", "target_layer"]
     with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         for r in sorted(rows, key=lambda r: (r["scope"], r.get("translator", ""),
                                              r.get("norm_mode", ""),
+                                             r.get("steering_mode", "additive"),
                                              r["behavior"], r["coefficient"])):
             w.writerow(r)
 
 
 def build_summary(rows, coherent_max=5.0):
-    # index by block; the method is part of the block identity so a results file
-    # holding several methods does not merge their curves
+    # index by block; the method and steering_mode are part of the block identity
+    # so a results file holding several methods, or both additive and projection
+    # runs, does not merge their curves — a coefficient in one mode is not the
+    # same physical intervention as the same-valued coefficient in the other.
     blocks = defaultdict(list)
     for r in rows:
         blocks[(r.get("method") or "CAA", r["scope"], r.get("translator", ""),
-                r.get("norm_mode", ""), r["behavior"])].append(r)
+                r.get("norm_mode", ""), r.get("steering_mode", "additive"),
+                r["behavior"])].append(r)
 
-    # Source curves + their own response metrics, keyed by (method, source layer,
-    # behavior): with layer-pair sweeps there is one baseline per source layer,
-    # and each translator is judged against the baseline of ITS method and source
-    # layer. Rows predating layer support carry no source_layer -> default 8.
+    # Source curves + their own response metrics, keyed by (method, steering_mode,
+    # source layer, behavior): with layer-pair sweeps there is one baseline per
+    # source layer, and each translator is judged against the baseline of ITS
+    # method, steering_mode and source layer. Rows predating layer support carry
+    # no source_layer -> default 8.
     source_curve = {}
     source_stats = {}
-    for (meth, scope, tr, nm, beh), rs in blocks.items():
+    for (meth, scope, tr, nm, sm, beh), rs in blocks.items():
         if scope == "source":
             lay = rs[0].get("source_layer", 8)
-            source_curve[(meth, lay, beh)] = _curve(rs)
-            source_stats[(meth, lay, beh)] = _response_metrics(
-                source_curve[(meth, lay, beh)], coherent_max)
+            source_curve[(meth, sm, lay, beh)] = _curve(rs)
+            source_stats[(meth, sm, lay, beh)] = _response_metrics(
+                source_curve[(meth, sm, lay, beh)], coherent_max)
 
     summary = []
-    for (meth, scope, tr, nm, beh), rs in blocks.items():
+    for (meth, scope, tr, nm, sm, beh), rs in blocks.items():
         if scope != "target":
             continue
         cur = _curve(rs)
@@ -90,7 +95,7 @@ def build_summary(rows, coherent_max=5.0):
         # "agree", which inflates the score.
         fid = float("nan")
         src_lay = rs[0].get("source_layer", 8)
-        sc = source_curve.get((meth, src_lay, beh))
+        sc = source_curve.get((meth, sm, src_lay, beh))
         if sc:
             shared = sorted(c for c in (set(cur) & set(sc)) if abs(c) <= coherent_max)
             if len(shared) >= 2:
@@ -105,6 +110,7 @@ def build_summary(rows, coherent_max=5.0):
             "loss": ex.get("loss", ""),
             "pooling": ex.get("pooling", ""),
             "norm_mode": nm,
+            "steering_mode": sm,
             "behavior": beh,
             "response_corr": m["response_corr"],
             "dP_coherent": m["dP_coherent"],
@@ -121,8 +127,8 @@ def build_summary(rows, coherent_max=5.0):
 
 
 def write_summary_csv(summary, path):
-    cols = ["method", "translator_type", "loss", "pooling", "norm_mode", "behavior",
-            "response_corr", "dP_coherent", "p_neg", "p_at_0", "p_pos",
+    cols = ["method", "translator_type", "loss", "pooling", "norm_mode", "steering_mode",
+            "behavior", "response_corr", "dP_coherent", "p_neg", "p_at_0", "p_pos",
             "monotonic", "fidelity_vs_source", "sv_norm",
             "source_layer", "target_layer", "translator"]
     with open(path, "w", newline="") as f:
@@ -638,9 +644,13 @@ def build_html(rows, summary, source_curve, source_stats, path, coherent_max=5.0
 
     sum_rows = []
     for beh in behaviors:
-        src_layers = sorted({(meth, lay) for (meth, lay, b) in source_stats if b == beh})
-        for meth, lay in src_layers:
-            ss = source_stats[(meth, lay, beh)]
+        # source_stats is keyed (method, steering_mode, layer, behavior) since
+        # steering_mode became a dimension; the source baseline is additive-only
+        # in practice, but iterate the full key so a projection-mode source row
+        # can never make this unpack fail again.
+        src_layers = sorted({(meth, sm, lay) for (meth, sm, lay, b) in source_stats if b == beh})
+        for meth, sm, lay in src_layers:
+            ss = source_stats[(meth, sm, lay, beh)]
             rc = ss.get("response_corr", float("nan"))
             sum_rows.append(
                 f'<tr class="src"><td class="lbl">{html.escape(beh)}</td>'
@@ -834,6 +844,15 @@ def main():
                          "means a different physical dose per method — so pass one "
                          "method when the results file holds several. Rows with no "
                          "method field are treated as CAA. Default: all rows present.")
+    ap.add_argument("--steering-mode", default="additive", choices=["additive", "projection"],
+                    help="Restrict to this application mode (additive=apply_steering, "
+                         "projection=apply_projection_ablation). Like --methods, this report "
+                         "is single-mode by construction — build_html's chart/coherent-window "
+                         "logic assumes one coefficient axis, and additive coefficients and "
+                         "projection alphas are not the same physical quantity. Rows with no "
+                         "steering_mode field predate the dimension and are treated as "
+                         "additive. Pass 'projection' to report on apply_projection_ablation "
+                         "runs instead.")
     ap.add_argument("--coherent-max", type=float, default=5.0,
                     help="Max |coeff| treated as coherent (beyond it the model "
                          "collapses); response/fidelity computed within this window. "
@@ -852,9 +871,11 @@ def main():
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     rows = load_rows(args.results, methods=args.methods)
+    rows = [r for r in rows if r["steering_mode"] == args.steering_mode]
     if not rows:
         raise SystemExit(f"No result rows found in {args.results}"
-                         + (f" for methods {args.methods}" if args.methods else ""))
+                         + (f" for methods {args.methods}" if args.methods else "")
+                         + f" with steering_mode={args.steering_mode!r}")
     present = sorted({r["method"] for r in rows})
     print(f"  Loaded {len(rows)} rows from {args.results}  (methods: {present})")
     if len(present) > 1:

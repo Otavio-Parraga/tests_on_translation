@@ -23,7 +23,7 @@ from typing import List
 import torch
 from tqdm import tqdm
 
-from ..utils.hf import append_mask_token, get_layer, resolve_mask_token_id
+from ..utils.hf import append_mask_token, get_layer, iter_layers, resolve_mask_token_id
 
 
 @dataclass
@@ -59,6 +59,38 @@ def apply_steering(model, layer_idx: int, module_name: str,
         handle.remove()
 
 
+@contextmanager
+def apply_projection_ablation(model, v: torch.Tensor, alpha: float = 1.0):
+    """Orthogonal-projection steering hook (arXiv 2512.24143v2, "Activation
+    Steering for Masked Diffusion Language Models"): subtracts the SAME
+    direction from every layer's residual stream, at every token position,
+    rather than adding a scaled vector at one chosen layer over the response
+    region only (apply_steering above).
+
+        h~ = h - alpha * (h . v_hat) v_hat
+
+    `v` need not be pre-normalized — it is normalized here, since a
+    projection operator requires a unit vector; `alpha=1.0` is the paper's
+    exact ablation, `alpha=0` is a no-op (mirrors apply_steering's coeff=0
+    baseline)."""
+    unit = torch.nn.functional.normalize(v.float(), dim=-1)
+
+    def hook(module, input, output):
+        is_tuple = isinstance(output, tuple)
+        act = output[0] if is_tuple else output
+        u = unit.to(act)
+        proj = (act * u).sum(dim=-1, keepdim=True) * u
+        act = act - alpha * proj
+        return (act,) + output[1:] if is_tuple else act
+
+    handles = [layer.register_forward_hook(hook) for layer in iter_layers(model)]
+    try:
+        yield
+    finally:
+        for h in handles:
+            h.remove()
+
+
 def prompt_len(tok, messages) -> int:
     """Number of tokens up to (not including) the assistant turn."""
     text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
@@ -92,6 +124,7 @@ def run_ab_eval(
     coefficients: List[float],
     limit: int = None,
     mask_readout: bool = None,
+    steering_mode: str = "additive",
 ) -> List[ABResult]:
     """
     Closed-ended A/B evaluation following nrimsky/CAA:
@@ -104,7 +137,19 @@ def run_ab_eval(
     not cosmetic. ``mask_readout`` defaults to auto-detection via
     ``needs_mask_readout(model)``; pass True/False only to force one path (e.g.
     to reproduce the pre-fix numbers on a diffusion target).
+
+    ``steering_mode`` selects how `sv` is applied at each nonzero item in
+    `coefficients`: "additive" (default) is apply_steering — one layer
+    (`layer_idx`/`module_name`), response region only, `act + coeff*sv`.
+    "projection" is apply_projection_ablation — every layer, every position,
+    `act - coeff*(act.v_hat)v_hat` (`layer_idx`/`module_name` are unused in
+    this mode). The two modes are not swept on the same physical axis —
+    "additive" coefficients are a signed magnitude, "projection" coefficients
+    are the fraction of the direction removed (alpha) — but both reuse the
+    `coefficients` list and the `coeff == 0` baseline branch below unchanged.
     """
+    if steering_mode not in ("additive", "projection"):
+        raise ValueError(f"Unknown steering_mode {steering_mode!r}, expected 'additive' or 'projection'")
     if limit:
         items = items[:limit]
 
@@ -151,6 +196,9 @@ def run_ab_eval(
             with torch.no_grad():
                 if coeff == 0:
                     out = model(**tokens)
+                elif steering_mode == "projection":
+                    with apply_projection_ablation(model, sv, alpha=coeff):
+                        out = model(**tokens)
                 else:
                     with apply_steering(model, layer_idx, module_name, sv, coeff, plen):
                         out = model(**tokens)

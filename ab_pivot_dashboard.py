@@ -165,6 +165,13 @@ def main():
     ap.add_argument("--method", default="CAA",
                     help="Discovery method to render (default CAA). One method per "
                          "page — see the module docstring for why.")
+    ap.add_argument("--steering-mode", default="additive", choices=["additive", "projection"],
+                    help="Application mode to render (default additive). One mode per "
+                         "page, same reason as --method: the whole page's coefficient "
+                         "framing (coherentMax, 'steering coefficient' axis) assumes one "
+                         "physical dosing scheme, and an apply_projection_ablation alpha "
+                         "is not that. Rows with no steering_mode field predate the "
+                         "dimension and are treated as additive.")
     args = ap.parse_args()
 
     all_records, source_curves, seen = [], {}, set()
@@ -175,6 +182,7 @@ def main():
             print(f"  skip {meta['id']}: {results_csv} not found")
             continue
         rows = load_rows(results_csv, methods=(args.method,))
+        rows = [r for r in rows if r["steering_mode"] == args.steering_mode]
         if not rows:
             print(f"  skip {meta['id']}: no {args.method} rows in {results_csv}")
             continue
@@ -192,6 +200,7 @@ def main():
 
     if LOBO_CSV.exists():
         lobo_rows = load_rows(LOBO_CSV, methods=(args.method,))
+        lobo_rows = [r for r in lobo_rows if r["steering_mode"] == args.steering_mode]
         lobo_recs, lobo_srcs = collect_lobo(lobo_rows)
         for r in lobo_recs:
             key = (r["model"], r["config"], r["behavior"], r["layer"])

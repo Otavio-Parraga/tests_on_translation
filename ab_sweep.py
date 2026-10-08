@@ -81,6 +81,12 @@ SOURCE_LAYER = LAYER      # CAA SVs were extracted at layer 8
 _MAG = [1000, 500, 250, 100, 50, 10, 5, 2, 1, 0.75, 0.50, 0.25]
 COEFFICIENTS = sorted({-m for m in _MAG} | {0.0} | {m for m in _MAG})
 
+# apply_projection_ablation's alpha is "fraction of the direction removed", a
+# different physical quantity from the additive coefficient above (which can
+# scale a direction to 1000x its own norm) — 1.0 is the paper's exact ablation;
+# values beyond 1 over-ablate (push PAST orthogonal, into the opposite half-space).
+ALPHAS = sorted({0.0, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0})
+
 DEFAULT_OUT = _HERE / "outputs" / "ab_eval"
 
 
@@ -115,14 +121,19 @@ def transport_modes(ttype: str) -> List[TransportMode]:
 # (Checkpoint metadata parsing lives in acttrans.utils.checkpoints.)
 
 def _combo_key(row: dict) -> str:
-    """Stable identity for a (method, scope, translator, norm, behavior) eval block.
+    """Stable identity for a (method, scope, translator, norm, steering_mode,
+    behavior) eval block.
 
-    Rows written before methods were a dimension carry no `method` field and are
-    all CAA, so a missing/empty method resolves to CAA — that keeps every
-    pre-existing CAA row a valid resume key."""
+    Rows written before methods (or steering_mode) were a dimension carry no
+    `method` (or `steering_mode`) field; both default the same way — missing
+    method resolves to CAA, missing steering_mode resolves to "additive" (the
+    only mode that existed before apply_projection_ablation) — so every
+    pre-existing row stays a valid resume key."""
     method = row.get("method") or METHOD
+    steering_mode = row.get("steering_mode") or "additive"
     return "|".join([method] + [str(row.get(k, "")) for k in
-                                ("scope", "translator", "norm_mode", "behavior")])
+                                ("scope", "translator", "norm_mode", "behavior")]
+                    + [steering_mode])
 
 
 def _load_done(jsonl_path: Path) -> set:
@@ -154,7 +165,7 @@ def _source_label(layer: int) -> str:
 
 def _emit(scope, translator: Optional[TranslatorInfo], norm_mode, behavior,
           agg: dict, sv_norm: float, source_layer: int = SOURCE_LAYER,
-          method: str = METHOD) -> List[dict]:
+          method: str = METHOD, steering_mode: str = "additive") -> List[dict]:
     if translator:
         source_layer = translator.src_layer
     base = {
@@ -165,6 +176,7 @@ def _emit(scope, translator: Optional[TranslatorInfo], norm_mode, behavior,
         "loss": translator.loss if translator else "",
         "pooling": translator.pooling if translator else "",
         "norm_mode": norm_mode,                    # "restore"|"no_restore"|"procrustes"|"" (source)
+        "steering_mode": steering_mode,             # "additive" | "projection"
         "behavior": behavior,
         "sv_norm": sv_norm,
         "source_layer": source_layer,                     # layer the source SV came from
@@ -223,20 +235,22 @@ def _load_test_items(behavior: str) -> List[dict]:
 
 
 def phase_source(source_layers, behaviors, coefficients, limit, device,
-                 jsonl_path, done, methods):
+                 jsonl_path, done, methods, steering_mode="additive"):
     """Baseline: original SV on the SOURCE model (Llama-1B), once per
     (method, source layer, behavior). Each translator's fidelity is judged
     against the baseline of the method and layer its source vector came from."""
     todo = [(m, lay, b) for m in methods for lay in source_layers for b in behaviors
             if _combo_key({"method": m, "scope": "source",
                            "translator": _source_label(lay),
-                           "norm_mode": "", "behavior": b}) not in done]
+                           "norm_mode": "", "behavior": b,
+                           "steering_mode": steering_mode}) not in done]
     if not todo:
         print("\n  PHASE 2 (source baseline) — all method/layer/behavior combos done, skipping")
         return
     print("\n" + "=" * 70)
     print(f"  PHASE 2 — source baseline on {SOURCE_MODEL}  "
-          f"(methods {methods}, layers {sorted(source_layers)}, {len(todo)} combos)")
+          f"(methods {methods}, layers {sorted(source_layers)}, {len(todo)} combos, "
+          f"steering_mode={steering_mode})")
     print("=" * 70)
     model, tok = _load_model_on(SOURCE_MODEL, device)
     try:
@@ -250,10 +264,10 @@ def phase_source(source_layers, behaviors, coefficients, limit, device,
             print(f"  [source] {method} l{layer} / {behavior}  ({len(items)} items, "
                   f"|sv|={sv.float().norm().item():.3f})")
             results = run_ab_eval(model, tok, items, sv, layer, MODULE,
-                                  coefficients, limit=limit)
+                                  coefficients, limit=limit, steering_mode=steering_mode)
             rows = _emit("source", None, "", behavior, aggregate_by_coefficient(results),
                          float(sv.float().norm().item()), source_layer=layer,
-                         method=method)
+                         method=method, steering_mode=steering_mode)
             _append_rows(jsonl_path, rows)
             done.add(_combo_key(rows[0]))
     finally:
@@ -262,7 +276,7 @@ def phase_source(source_layers, behaviors, coefficients, limit, device,
 
 
 def phase_target(translators, table, behaviors, coefficients, limit, device,
-                 jsonl_path, done, methods):
+                 jsonl_path, done, methods, steering_mode="additive"):
     """Translated SV on each checkpoint's OWN target model, all combos.
 
     Translators are grouped by their target model (read from the checkpoint
@@ -291,7 +305,8 @@ def phase_target(translators, table, behaviors, coefficients, limit, device,
                             key = _combo_key({"method": method, "scope": "target",
                                               "translator": tr.name,
                                               "norm_mode": mode.label,
-                                              "behavior": behavior})
+                                              "behavior": behavior,
+                                              "steering_mode": steering_mode})
                             if key in done:
                                 continue
                             entry = (table.get(tr.name, {}).get(mode.label, {})
@@ -306,12 +321,14 @@ def phase_target(translators, table, behaviors, coefficients, limit, device,
                             tlayer = _target_layer_of(sv_file)
                             items = _load_test_items(behavior)
                             print(f"  [target] {method} / {tr.name} / {mode.label} / "
-                                  f"{behavior} (L{tlayer}, |sv|={sv_norm:.3f})")
+                                  f"{behavior} (L{tlayer}, |sv|={sv_norm:.3f}, "
+                                  f"steering_mode={steering_mode})")
                             results = run_ab_eval(model, tok, items, sv, tlayer, MODULE,
-                                                  coefficients, limit=limit)
+                                                  coefficients, limit=limit,
+                                                  steering_mode=steering_mode)
                             rows = _emit("target", tr, mode.label, behavior,
                                          aggregate_by_coefficient(results), sv_norm,
-                                         method=method)
+                                         method=method, steering_mode=steering_mode)
                             _append_rows(jsonl_path, rows)
                             done.add(key)
         finally:
@@ -330,7 +347,7 @@ def _native_label(layer: int, model_name: Optional[str] = None) -> str:
 
 
 def phase_native(translators, behaviors, coefficients, limit, device,
-                 jsonl_path, done, methods):
+                 jsonl_path, done, methods, steering_mode="additive"):
     """Upper-bound baseline: the natively-extracted TARGET-model SV at each target
     layer, evaluated on the TARGET model itself (no transport). This is the
     reference a translated vector should be judged against — it lets us report
@@ -354,7 +371,8 @@ def phase_native(translators, behaviors, coefficients, limit, device,
         todo = [(m, lay, b) for m in methods for lay in layers for b in behaviors
                 if _combo_key({"method": m, "scope": "native",
                                "translator": _native_label(lay, target_model_name),
-                               "norm_mode": "", "behavior": b}) not in done]
+                               "norm_mode": "", "behavior": b,
+                               "steering_mode": steering_mode}) not in done]
         if not todo:
             print(f"  -- {target_model_name}: all method/layer/behavior combos done, skipping")
             continue
@@ -371,9 +389,9 @@ def phase_native(translators, behaviors, coefficients, limit, device,
                 items = _load_test_items(behavior)
                 print(f"  [native] {method} / {target_model_name.split('/')[-1]} l{layer} / "
                       f"{behavior}  ({len(items)} items, "
-                      f"|sv|={sv.float().norm().item():.3f})")
+                      f"|sv|={sv.float().norm().item():.3f}, steering_mode={steering_mode})")
                 results = run_ab_eval(model, tok, items, sv, layer, MODULE,
-                                      coefficients, limit=limit)
+                                      coefficients, limit=limit, steering_mode=steering_mode)
                 agg = aggregate_by_coefficient(results)
                 base = {
                     "method": method,
@@ -381,6 +399,7 @@ def phase_native(translators, behaviors, coefficients, limit, device,
                     "translator": _native_label(layer, target_model_name),
                     "translator_type": "native",
                     "loss": "", "pooling": "", "norm_mode": "",
+                    "steering_mode": steering_mode,
                     "behavior": behavior,
                     "sv_norm": float(sv.float().norm().item()),
                     "source_layer": None,
@@ -443,7 +462,15 @@ def parse_args():
                         "one results file. NOTE: CAA vectors carry their own magnitude "
                         "while RepE/GCAV are unit-norm, so compare methods on "
                         "dose = coefficient * sv_norm (see method_report.py).")
-    p.add_argument("--coefficients", type=float, nargs="+", default=COEFFICIENTS)
+    p.add_argument("--steering-mode", default="additive", choices=["additive", "projection"],
+                   help="additive = apply_steering (one layer, response region, "
+                        "act + coeff*sv). projection = apply_projection_ablation "
+                        "(arXiv 2512.24143v2: every layer, every position, "
+                        "act - coeff*(act.v_hat)v_hat — coeff is the fraction of the "
+                        "direction removed, 1.0 = the paper's exact ablation). Default "
+                        "coefficient grid switches to ALPHAS for 'projection' unless "
+                        "--coefficients is given explicitly.")
+    p.add_argument("--coefficients", type=float, nargs="+", default=None)
     p.add_argument("--limit", type=int, default=None,
                    help="Cap test items per coeff (quick runs)")
     p.add_argument("--device", default="cuda:0")
@@ -467,6 +494,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.coefficients is None:
+        args.coefficients = ALPHAS if args.steering_mode == "projection" else COEFFICIENTS
     out_root = Path(args.out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_root / args.results_name
@@ -480,6 +509,7 @@ def main():
         print(f"    - {tr.ttype:8s} {tr.loss:8s} {tr.pooling:4s} "
               f"l{tr.src_layer}->l{tr.tgt_layer}  {tr.name}")
     print(f"  Methods     : {args.methods}")
+    print(f"  Steering    : {args.steering_mode}")
     print(f"  Behaviors   : {args.behaviors}")
     print(f"  Coefficients: {args.coefficients}")
     print(f"  Results     : {jsonl_path}")
@@ -515,15 +545,17 @@ def main():
     if args.with_source:
         source_layers = sorted({tr.src_layer for tr in translators}) or [SOURCE_LAYER]
         phase_source(source_layers, args.behaviors, args.coefficients, args.limit,
-                     args.device, jsonl_path, done, args.methods)
+                     args.device, jsonl_path, done, args.methods, args.steering_mode)
 
     if args.with_target:
         phase_target(translators, table, args.behaviors, args.coefficients,
-                     args.limit, args.device, jsonl_path, done, args.methods)
+                     args.limit, args.device, jsonl_path, done, args.methods,
+                     args.steering_mode)
 
     if args.with_native:
         phase_native(translators, args.behaviors, args.coefficients,
-                     args.limit, args.device, jsonl_path, done, args.methods)
+                     args.limit, args.device, jsonl_path, done, args.methods,
+                     args.steering_mode)
 
     print(f"\n  Done. Rows in {jsonl_path}. Build tables with: "
           f"conda run -n acteng python ab_report.py --results {jsonl_path}")

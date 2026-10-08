@@ -73,7 +73,15 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--layers", type=int, nargs="+", required=True)
     ap.add_argument("--role", default="target_model", choices=["target_model", "source_model"])
+    ap.add_argument("--token-position", default=None,
+                    help="Override the config block's token_position ('mean', 'mask', or an int "
+                         "such as -1) so one config can verify caches at several read positions, "
+                         "e.g. the mean and -1 arms extract_activations_multi.py writes together. "
+                         "Default: whatever the config says.")
     args = ap.parse_args()
+    if args.token_position is not None:
+        tp = args.token_position
+        args.token_position = tp if tp in ("mean", "mask") else int(tp)
 
     with open(args.config, "rb") as f:
         cfg = tomllib.load(f)
@@ -87,6 +95,8 @@ def main():
     for layer in args.layers:
         mcfg = dict(cfg[args.role])
         mcfg["layer"] = layer
+        if args.token_position is not None:
+            mcfg["token_position"] = args.token_position
         p = activation_path(data_dir, mcfg)
         problems = check_one(p, sentences)
         if problems:

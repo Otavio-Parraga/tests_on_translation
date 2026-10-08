@@ -1,0 +1,76 @@
+# CHAT-TEMPLATED 500k companion of fineweb_llada8b_500k.toml. Same model, same
+# 500k sentences, same layers — the ONLY difference is that every sentence is
+# wrapped in the model's user-turn chat template before the forward pass
+# (chat_template = true on both model blocks):
+#
+#   fineweb_llada8b_500k.toml       raw sentence        data/fineweb_500k        (complete, untouched)
+#   fineweb_llada8b_500k_chat.toml  templated sentence  data/fineweb_500k_chat   (this file)
+#
+# WHY: the Procrustes map fitted on this data is applied to CAA steering vectors
+# extracted from CHAT-TEMPLATED prompts (extract_caa_diff_source.py builds
+# apply_chat_template(...) + "Answer: (A)"). Fitting on raw sentences fits the map
+# in a different region of activation space than the one it is used in.
+#
+# TWO READ POSITIONS PER LAYER, ONE PASS: extract_activations_multi.py reads both
+#   "mean"  mask-weighted mean over every real token      -> ..._l{L}_mean.pt
+#   -1      the last real token = the final token of the assistant-turn opener
+#           (post-instruction: "<|end_header_id|>\n\n" for this model), the
+#           position immediately before generation, and the paper's selected
+#           position family (arXiv 2512.24143v2 §4.1)     -> ..._l{L}.pt
+# from the same forward pass, so mean-vs-position is one extraction, not two.
+# token_position below is the DEFAULT arm (what the single-layer scripts and
+# fit_procrustes.py read when not overridden); the driver's --positions sets the
+# per-cache position. For the -1 arm, fit with a config whose target
+# token_position = -1, or override --target-activations.
+#
+# data/fineweb_500k_chat/sentences.json is a byte-for-byte copy of
+# data/fineweb_500k/sentences.json — row-aligned with the raw caches AND with the
+# templated Llama-3.2-1B source caches extracted elsewhere, which must be placed
+# in data/fineweb_500k_chat/activations/ with the same slug convention
+# (Llama-3.2-1B-Instruct_l8.pt for -1, _l8_mean.pt for mean).
+#
+# Layer sweep: {10,12,14,16,18,20,22} = the existing middle-third sweep, PLUS
+# {24,26}: the paper localises steering to layers ~18-24 (best: 23 of 32), and
+# our own A/B sweep's effect is still rising at 22, its last sampled layer. Two
+# more layers cost one deeper forward and ~17GB, not another pass.
+# Disk: ~4.2 GiB per cache (500k x 4096 x bf16 + sentences), x9 layers x2
+# positions ~= 75 GiB.
+#
+# Full pipeline: scripts/run_llada_500k_chat.sh
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW.
+
+batch_size = 16   # same as fineweb_llada8b_500k.toml (8B dense params)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+chat_template = true
+
+[target_model]
+name = "GSAI-ML/LLaDA-8B-Instruct"
+layer = 22                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mean"   # default arm; see header
+chat_template = true
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 500000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb_500k_chat"      # templated caches, separate from the raw 500k dir
+output_dir = "outputs/new_models_500k_chat"
+seed = 42
+train_ratio = 0.8
+normalize_activations = false            # RAW activations — see header

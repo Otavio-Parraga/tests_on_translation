@@ -39,10 +39,15 @@ def load_rows_jsonl(patterns, methods=None):
                     continue
                 r = json.loads(line)
                 r["method"] = r.get("method") or "CAA"
+                # Rows predating steering_mode as a dimension carry no field and
+                # were all additive (apply_steering, the only mode that existed) —
+                # default them the same way `method` is defaulted above.
+                r["steering_mode"] = r.get("steering_mode") or "additive"
                 if methods and r["method"] not in methods:
                     continue
                 k = (r["method"], r.get("scope"), r.get("translator"),
-                     r.get("norm_mode"), r.get("behavior"), r.get("coefficient"))
+                     r.get("norm_mode"), r.get("behavior"), r.get("coefficient"),
+                     r["steering_mode"])
                 if k in seen:
                     continue
                 seen.add(k)
@@ -67,6 +72,7 @@ def load_rows_csv(results_csv, methods=("CAA",)):
         rows = [r for r in rows if (r.get("method") or "CAA") in methods]
     for r in rows:
         r["method"] = r.get("method") or "CAA"
+        r["steering_mode"] = r.get("steering_mode") or "additive"
         r["coefficient"] = float(r["coefficient"])
         r["avg_p_match"] = float(r["avg_p_match"])
         r["accuracy"] = float(r["accuracy"])

@@ -58,6 +58,46 @@ class _StopForward(Exception):
     targets (e.g. gemma's 256k-row lm_head needs ~8 GiB just for the logits)."""
 
 
+def _apply_chat_template(tokenizer, sentences: List[str], max_len: int, prefix: str = "") -> List[str]:
+    """Wrap each sentence as a user turn in the model's chat template, with the
+    assistant turn opened (`add_generation_prompt=True`) — the same construction
+    extract_caa_diff_source.py uses for the steering vectors this data fits a map
+    for, minus the trailing "Answer: {choice}" (there is no choice for plain text).
+
+    Long sentences are shortened BEFORE templating so the template's own trailing
+    tokens always survive. Right-truncating the templated string instead would cut
+    the assistant-turn boilerplate off the end, which is exactly where a
+    token_position=-1 readout lands — leaving a handful of rows read at a content
+    token while every other row is read at boilerplate.
+    """
+    if getattr(tokenizer, "chat_template", None) is None:
+        raise ValueError(
+            f"chat_template=True but {tokenizer.__class__.__name__} has no chat_template. "
+            "Only instruct/chat checkpoints can be templated."
+        )
+
+    def wrap(text: str) -> str:
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": text}], tokenize=False, add_generation_prompt=True
+        )
+
+    overhead = len(tokenizer(wrap(""), add_special_tokens=False)["input_ids"])
+    budget = max_len - overhead
+    if budget <= 0:
+        raise ValueError(f"Chat template alone needs {overhead} tokens, over the {max_len} budget.")
+
+    out, n_truncated = [], 0
+    for s in sentences:
+        ids = tokenizer(s, add_special_tokens=False)["input_ids"]
+        if len(ids) > budget:
+            s = tokenizer.decode(ids[:budget])
+            n_truncated += 1
+        out.append(wrap(s))
+    print(f"{prefix}chat_template ON: {overhead} template tokens/row, "
+          f"{n_truncated}/{len(sentences)} sentences shortened to fit {budget}.")
+    return out
+
+
 def extract_activations_with_resume(
     model_cfg: Dict,
     sentences: List[str],
@@ -80,14 +120,49 @@ def extract_activations_with_resume(
     batch_dir = save_path.parent / f".{save_path.stem}_batches"
     prefix = f"[{label}] " if label else ""
 
+    # chat_template (opt-in, default OFF so every existing cache and config keeps
+    # its exact meaning): wrap each sentence in the model's user-turn chat template
+    # before tokenizing, instead of feeding the raw sentence. The point is to fit
+    # the translator in the SAME region of activation space the steering vectors it
+    # transports were extracted from — those come from templated prompts (see
+    # extract_caa_diff_source.py) while raw-sentence activations do not.
+    #
+    # This flag is NOT part of model_slug(), so a templated and a raw cache would
+    # collide on filename. Rather than widen the slug convention (which every slug
+    # PARSER in checkpoints.py / results_io.py / comparison.common would have to
+    # learn), the flag is recorded in the cache and cross-checked on reuse below:
+    # extraction skips any cache whose n_sentences already matches, so without this
+    # check a templated run would silently REUSE raw activations and report success
+    # — the exact failure mode paths.py's slug docstring warns about. Keep
+    # templated runs in their own data_dir; the check is the backstop, not the plan.
+    chat_template = bool(model_cfg.get("chat_template", False))
+    meta_path = batch_dir / "meta.json"
+
+    def _check_flag(found: bool, where: str):
+        if found != chat_template:
+            raise RuntimeError(
+                f"{prefix}chat_template mismatch: {where} was built with "
+                f"chat_template={found}, but this run asks for {chat_template}. "
+                f"Refusing to mix templated and raw activations in one cache "
+                f"({save_path}). Use a separate training.data_dir per variant."
+            )
+
     # Already fully complete?
     if save_path.exists():
         ckpt = torch.load(save_path, weights_only=False)
         if ckpt.get("n_sentences") == len(sentences):
+            _check_flag(bool(ckpt.get("chat_template", False)), "the existing cache")
             print(f"{prefix}Already complete ({len(sentences)} sentences), skipping extraction.")
             return ckpt["activations"]
 
     batch_dir.mkdir(parents=True, exist_ok=True)
+    # Same check for a partially-finished run: resuming into batch files written
+    # under the other setting would splice two different input formats together.
+    if meta_path.exists():
+        _check_flag(bool(json.loads(meta_path.read_text()).get("chat_template", False)),
+                    "the partial batch directory")
+    else:
+        meta_path.write_text(json.dumps({"chat_template": chat_template}))
 
     # Determine resume position from previously saved batch files
     existing_batches = sorted(batch_dir.glob("batch_*.pt"))
@@ -164,7 +239,10 @@ def extract_activations_with_resume(
             raise _StopForward
 
         handle = layer.register_forward_hook(hook_fn)
-        remaining = sentences[start_idx:]
+        # max_length budget: one slot is reserved when a [MASK] will be appended.
+        max_len = 511 if pooling_mask else 512
+        texts = _apply_chat_template(tokenizer, sentences, max_len, prefix) if chat_template else sentences
+        remaining = texts[start_idx:]
         n_batches = (len(remaining) + batch_size - 1) // batch_size
 
         tqdm_kwargs = dict(total=n_batches, desc=f"{prefix}Extracting", unit="batch")
@@ -180,7 +258,11 @@ def extract_activations_with_resume(
                     truncation=True,
                     # Reserve a slot for the appended [MASK] so the widened
                     # sequence still respects the 512 budget.
-                    max_length=511 if pooling_mask else 512,
+                    max_length=max_len,
+                    # A chat template already emits its own BOS/role headers, so
+                    # letting the tokenizer add specials on top would duplicate BOS
+                    # and shift every template-relative position by one.
+                    add_special_tokens=not chat_template,
                     return_tensors="pt",
                 )
                 encoded = {k: v.to(device) for k, v in encoded.items()}
@@ -242,7 +324,11 @@ def extract_activations_with_resume(
     # Merge all batch files into the final output file
     all_batches = sorted(batch_dir.glob("batch_*.pt"))
     merged = torch.cat([torch.load(b, weights_only=True) for b in all_batches], dim=0)
-    torch.save({"activations": merged, "sentences": sentences, "n_sentences": len(sentences)}, save_path)
+    # `sentences` stays the RAW sentence set even under chat_template — it is the
+    # row-alignment key shared with every other cache on this sentence set, and
+    # the templated form is fully recoverable from the flag + tokenizer.
+    torch.save({"activations": merged, "sentences": sentences, "n_sentences": len(sentences),
+                "chat_template": chat_template}, save_path)
     shutil.rmtree(batch_dir)
     print(f"{prefix}Saved {merged.shape[0]} activations to {save_path}")
 

@@ -36,6 +36,11 @@ from acttrans.utils.config import load_activations, load_config, resolve_activat
 from acttrans.utils.paths import best_translator_path
 
 
+def _parse_token_position(s: str):
+    """'mean' / 'mask' stay strings; anything else must be an int (e.g. '-1')."""
+    return s if s in ("mean", "mask") else int(s)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default="config/fineweb/mlp_mse_last.toml")
@@ -51,6 +56,14 @@ def main():
                              "(source, target) layer pair yields a distinct translator.")
     parser.add_argument("--target-layer", type=int, default=None,
                         help="Override target_model.layer from the config (see --source-layer).")
+    parser.add_argument("--source-token-position", type=_parse_token_position, default=None,
+                        metavar="POS",
+                        help="Override source_model.token_position ('mean', 'mask', or an int such "
+                             "as -1). Like --source-layer, applied BEFORE paths are computed, so it "
+                             "routes to that arm's activation cache AND stamps the checkpoint slug "
+                             "('_mean' / bare) — which is what ab_sweep.py reads the pooling from.")
+    parser.add_argument("--target-token-position", type=_parse_token_position, default=None,
+                        metavar="POS", help="Override target_model.token_position (see above).")
     parser.add_argument("--no-center", dest="center", action="store_false",
                         help="Do not mean-center before fitting (default: center)")
     parser.add_argument("--no-bias", dest="bias", action="store_false",
@@ -83,6 +96,12 @@ def main():
         config["source_model"]["layer"] = args.source_layer
     if args.target_layer is not None:
         config["target_model"]["layer"] = args.target_layer
+    # Read-position overrides, same contract as the layer overrides: they select
+    # the activation cache (via model_slug) and the checkpoint filename together.
+    if args.source_token_position is not None:
+        config["source_model"]["token_position"] = args.source_token_position
+    if args.target_token_position is not None:
+        config["target_model"]["token_position"] = args.target_token_position
 
     # Tag the checkpoint by the Procrustes variant so the with-bias and no-bias
     # fits land in DISTINCT files (..__linear__procrustes.pt vs

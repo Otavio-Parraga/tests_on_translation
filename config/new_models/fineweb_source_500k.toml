@@ -1,0 +1,48 @@
+# Source-side companion to fineweb_llada8b_500k.toml / fineweb_llada2mini_500k.toml.
+#
+# Those two configs extracted only their TARGET model (extract_activations_sweep.py
+# only ever touches [target_model]) against data/fineweb_500k/sentences.json. The
+# source side — meta-llama/Llama-3.2-1B-Instruct l8, the fixed source across every
+# config in config/new_models/ — was never extracted at the 500k scale, so no
+# Procrustes fit can pair source+target activations yet.
+#
+# This file exists purely as a vehicle: [target_model] here IS the project's source
+# model, so running extract_activations_sweep.py against it writes exactly the cache
+# every other *_500k.toml config's [source_model] expects:
+#   data/fineweb_500k/activations/Llama-3.2-1B-Instruct_l8.pt
+#
+# Extract (network-free, reuses data/fineweb_500k/sentences.json):
+#   CUDA_VISIBLE_DEVICES=2 conda run -p /mnt/C-SSD/parraga/conda_envs/act_eng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_source_500k.toml --layers 8
+
+batch_size = 32   # 1B params -> same headroom as fineweb_gemma1b.toml/fineweb_qwen0.5b.toml
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[dataset]
+name = "FINEWEB"
+behaviors = []
+split = "train"
+data_root = ""
+limit = 500000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb_500k"
+output_dir = "outputs/new_models_500k"
+seed = 42
+train_ratio = 0.8
+normalize_activations = false

@@ -827,6 +827,12 @@ def main():
                          "shares one coefficient axis across all its curves, which is "
                          "only meaningful within a single method; use method_report.py "
                          "to compare methods.")
+    ap.add_argument("--steering-mode", default="additive", choices=["additive", "projection"],
+                    help="Application mode to render (default additive) — same reasoning "
+                         "as --method: one coefficient axis for the whole dashboard, and a "
+                         "projection-ablation alpha is not the same physical dose as an "
+                         "additive coefficient. Rows with no steering_mode field predate the "
+                         "dimension and are treated as additive.")
     args = ap.parse_args()
 
     built = []
@@ -836,6 +842,7 @@ def main():
             print(f"  skip {meta['id']}: {results_csv} not found")
             continue
         rows = load_rows(results_csv, methods=(args.method,))
+        rows = [r for r in rows if r["steering_mode"] == args.steering_mode]
         if not rows:
             print(f"  skip {meta['id']}: no {args.method} rows in {results_csv}")
             continue

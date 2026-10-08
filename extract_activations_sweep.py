@@ -41,6 +41,13 @@ def main():
                     help="Target-model layers to extract (each cached separately).")
     ap.add_argument("--batch-size", type=int, default=None,
                     help="Override the config's batch_size.")
+    ap.add_argument("--role", default="target", choices=["target", "source"],
+                    help="Which model block to extract (default: target, this "
+                         "script's original and only behaviour). 'source' extracts "
+                         "[source_model] instead, so one config can build BOTH sides "
+                         "of a pair on the persisted sentence set — prepare_activations.py "
+                         "does pairs but re-streams FineWeb from the network and "
+                         "overwrites sentences.json, which would break row alignment.")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -73,9 +80,10 @@ def main():
         print(f"Streamed and saved {len(sentences)} sentences to {sp}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    tgt = dict(cfg["target_model"])
+    tgt = dict(cfg[f"{args.role}_model"])
     name = tgt["name"]
-    print(f"Model: {name}  |  device: {device}  |  layers: {args.layers}  |  batch: {batch_size}")
+    print(f"Model: {name} ({args.role})  |  device: {device}  |  layers: {args.layers}  "
+          f"|  batch: {batch_size}  |  chat_template: {bool(tgt.get('chat_template', False))}")
 
     for layer in args.layers:
         tgt["layer"] = layer

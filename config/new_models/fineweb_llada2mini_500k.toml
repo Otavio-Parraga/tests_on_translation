@@ -1,0 +1,62 @@
+# 500k-sentence companion of fineweb_llada2mini.toml (30k). Same model, same
+# layer sweep, same "mean" pooling — ONLY the sentence set and data_dir differ:
+#
+#   fineweb_llada2mini.toml       data/fineweb_30k   limit  30000  (unchanged)
+#   fineweb_llada2mini_500k.toml  data/fineweb_500k  limit 500000  (this file)
+#
+# data/fineweb_500k/sentences.json already exists (500000 FineWeb sentences,
+# prepared separately, and SHARED with fineweb_llada8b_500k.toml — same file,
+# same order) — extract_activations_sweep.py reuses it network-free, exactly
+# like the 30k config reuses data/fineweb_30k/sentences.json. This is a
+# SEPARATE data_dir, not a superset/replacement of the 30k one: every existing
+# 30k cache, and every other config pointing at data/fineweb_30k, is untouched
+# by anything run against this file.
+#
+# See config/new_models/fineweb_llada2mini.toml for the full model/architecture
+# notes (compat shims, block-diffusion attention mask, why "mean" pooling, the
+# ~33GB resident / do-not-run-concurrently-with-the-8B-sweep caveat). Repeated
+# here only where it affects THIS file's numbers:
+#
+# Layer sweep: target layers {6,8,10,12,14} = middle third of 20 layers.
+# Disk: ~3.81 GiB per (layer) cache at 500k rows x hidden_size 2048 x float32,
+# x5 layers ~= 19.05 GiB for this model's mean arm alone.
+#
+# Extract activations across the sweep (network-free, reuses
+# data/fineweb_500k/sentences.json):
+#   CUDA_VISIBLE_DEVICES=2 conda run -p /mnt/C-SSD/parraga/conda_envs/act_eng python extract_activations_sweep.py \
+#     --config config/new_models/fineweb_llada2mini_500k.toml --layers 6 8 10 12 14
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW.
+
+batch_size = 8    # same as fineweb_llada2mini.toml (16B total params resident)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+
+[target_model]
+name = "inclusionAI/LLaDA2.0-mini"
+layer = 10                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mean"
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 500000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb_500k"       # sentences.json + activation caches (separate from the 30k dir)
+output_dir = "outputs/new_models_500k"
+seed = 42
+train_ratio = 0.8
+normalize_activations = false        # RAW activations — see header

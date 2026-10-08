@@ -1,0 +1,72 @@
+# CHAT-TEMPLATED companion of fineweb_llada8b.toml. Same model, same 30k
+# sentences, same layer sweep, same read positions — the ONLY difference is that
+# every sentence is wrapped in the model's user-turn chat template before the
+# forward pass (chat_template = true on both model blocks):
+#
+#   fineweb_llada8b.toml            raw sentence        data/fineweb_30k        (unchanged)
+#   fineweb_llada8b_30k_chat.toml   templated sentence  data/fineweb_30k_chat   (this file)
+#
+# WHY: the Procrustes map fitted on this data is applied to CAA steering vectors
+# that were extracted from CHAT-TEMPLATED prompts —
+# extract_caa_diff_source.py builds apply_chat_template(...) + "Answer: (A)" and
+# reads token -2. Fitting the map on raw-sentence activations therefore fits it in
+# a different region of activation space than the one it is used in. This config
+# tests whether closing that gap produces a better map, measured against the
+# existing raw-sentence fit in outputs/new_models/ on the same 30k sentences.
+#
+# ONE VARIABLE ONLY. Read positions are deliberately left exactly as the raw run
+# had them (source token_position = -1, target "mean") so the comparison isolates
+# template vs no-template. Matching CAA's -2 answer-letter position is a SEPARATE
+# question — there is no answer letter to read for plain FineWeb text — and
+# changing pooling at the same time would confound the result.
+#
+# data/fineweb_30k_chat/sentences.json is a byte-for-byte copy of
+# data/fineweb_30k/sentences.json, so rows are aligned with the raw caches and the
+# two fits differ in nothing but the template. Nothing here writes to
+# data/fineweb_30k or outputs/new_models; the raw baseline stays intact.
+#
+# LLaDA-8B-Instruct ONLY at this scale — LLaDA2.0-mini is deliberately not part of
+# this experiment (decide on the 8B result first, then extend if it pays off).
+#
+# Layer sweep: target layers {10,12,14,16,18,20,22} = middle third of 32 blocks.
+# Disk: ~239 MiB per layer cache at 30k rows x hidden_size 4096 x float32, x7
+# layers ~= 1.7 GiB, plus ~70 MiB for the Llama source cache. Cheap.
+#
+# Full pipeline (extract both sides, fit, sweep): scripts/run_llada8b_30k_chat.sh
+#
+# normalize_activations = false: the closed-form orthogonal Procrustes map is
+# norm/inner-product preserving, so activations are fed RAW.
+
+batch_size = 16   # same as fineweb_llada8b.toml (8B dense params)
+
+[source_model]
+name = "meta-llama/Llama-3.2-1B-Instruct"
+layer = 8
+module = "residual"
+token_position = -1
+chat_template = true
+
+[target_model]
+name = "GSAI-ML/LLaDA-8B-Instruct"
+layer = 16                # default; overridden per-layer on the CLI
+module = "residual"
+token_position = "mean"
+chat_template = true
+
+[dataset]
+name = "FINEWEB"
+behaviors = []          # unused for FINEWEB
+split = "train"         # "train"/"generate" -> 80% ; "test" -> 20% (seed 42, doc-level)
+data_root = ""          # unused for FINEWEB; subset fixed to fineweb-edu/sample-10BT
+limit = 30000
+
+[translator]
+type = "linear"
+bias = true
+
+[training]
+data_dir = "data/fineweb_30k_chat"      # templated caches, separate from the raw 30k dir
+output_dir = "outputs/new_models_30k_chat"
+seed = 42
+train_ratio = 0.8
+normalize_activations = false           # RAW activations — see header
